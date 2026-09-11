@@ -1,0 +1,18 @@
+routing:
+
+  quality:
+    target: 0.80
+    probability_threshold: 0.80
+
+  latency:
+    enabled: true
+    max_latency_ms: 10000
+
+  objective:
+    type: cost
+    latency_penalty: 0.0
+
+  fallback:
+    enabled: true
+    min_confidence: 0.60
+    fallback_model: qwen3-8b

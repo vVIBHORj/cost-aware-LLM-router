@@ -1,0 +1,81 @@
+models:
+
+  - id: qwen3-1.7b
+    display_name: Qwen3 1.7B
+    provider: local
+    backend: vllm
+    model_name: Qwen/Qwen3-1.7B
+
+    role: cheap
+
+    capabilities:
+      supports_chat: true
+      supports_reasoning: true
+      supports_code: true
+      supports_math: true
+
+    limits:
+      context_window_tokens: 32768
+      max_output_tokens: 4096
+
+    pricing:
+      input_per_1m_tokens_usd: 0.0
+      output_per_1m_tokens_usd: 0.0
+
+    routing:
+      enabled: true
+      priority: 1
+
+
+  - id: qwen3-4b
+    display_name: Qwen3 4B
+    provider: local
+    backend: vllm
+    model_name: Qwen/Qwen3-4B
+
+    role: middle
+
+    capabilities:
+      supports_chat: true
+      supports_reasoning: true
+      supports_code: true
+      supports_math: true
+
+    limits:
+      context_window_tokens: 32768
+      max_output_tokens: 4096
+
+    pricing:
+      input_per_1m_tokens_usd: 0.0
+      output_per_1m_tokens_usd: 0.0
+
+    routing:
+      enabled: true
+      priority: 2
+
+
+  - id: qwen3-8b
+    display_name: Qwen3 8B
+    provider: local
+    backend: vllm
+    model_name: Qwen/Qwen3-8B
+
+    role: strong
+
+    capabilities:
+      supports_chat: true
+      supports_reasoning: true
+      supports_code: true
+      supports_math: true
+
+    limits:
+      context_window_tokens: 32768
+      max_output_tokens: 4096
+
+    pricing:
+      input_per_1m_tokens_usd: 0.0
+      output_per_1m_tokens_usd: 0.0
+
+    routing:
+      enabled: true
+      priority: 3
