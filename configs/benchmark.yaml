@@ -1,0 +1,309 @@
+# configs/benchmark.yaml
+#
+# Single source of truth for benchmark construction, splitting,
+# sampling, and dataset provenance.
+#
+# Split assignments must be generated from this configuration and
+# random_seed. Do not hand-edit split assignments downstream.
+
+benchmark:
+  name: qwen_router_benchmark_v1
+  version: 1
+  random_seed: 42
+
+  total_prompts: 2300
+  core_prompts: 2000
+  stress_prompts: 300
+
+  # Every benchmark prompt will eventually be executed against
+  # every enabled candidate model.
+  candidate_models:
+    - name: qwen3-1.7b
+    - name: qwen3-4b
+    - name: qwen3-8b
+
+
+# ---------------------------------------------------------------------------
+# CORE BENCHMARK — 2,000 prompts
+# ---------------------------------------------------------------------------
+
+core:
+  total: 2000
+
+  categories:
+
+    - name: general_qa
+      label: "General QA / knowledge"
+      count: 400
+      sources:
+        - mmlu
+
+    - name: reasoning
+      label: "Reasoning"
+      count: 300
+      sources:
+        - bbh
+
+    - name: math
+      label: "Math"
+      count: 300
+      sources:
+        - gsm8k
+        - math
+
+    - name: coding
+      label: "Coding"
+      count: 300
+      sources:
+        - humaneval
+        - mbpp
+
+    - name: instruction_following
+      label: "Instruction following"
+      count: 250
+      sources:
+        - ifeval
+
+    - name: summarization
+      label: "Summarization"
+      count: 200
+      sources:
+        - cnn_dailymail
+
+    - name: classification_extraction
+      label: "Classification / extraction"
+      count: 150
+      sources:
+        - boolq
+        - super_glue
+
+    - name: other
+      label: "Commonsense / other"
+      count: 100
+      sources:
+        - hellaswag
+
+  # Difficulty is normalized into these three buckets during ingestion.
+  # The source dataset's native difficulty metadata will be preserved
+  # separately when available.
+  difficulty_levels:
+    - easy
+    - medium
+    - hard
+
+  difficulty_strategy: stratified
+
+  split:
+    train: 1400
+    validation: 300
+    test: 300
+
+
+# ---------------------------------------------------------------------------
+# STRESS / OOD SET — 300 prompts
+#
+# This set is completely held out from router fitting.
+# ---------------------------------------------------------------------------
+
+stress:
+  total: 300
+  held_out: true
+
+  types:
+
+    - name: long_prompts
+      label: "Long prompts"
+      count: 60
+
+    - name: distractors
+      label: "Distractors / irrelevant context"
+      count: 50
+
+    - name: paraphrased
+      label: "Paraphrased prompts"
+      count: 50
+
+    - name: formatting_variations
+      label: "Formatting variations"
+      count: 40
+
+    - name: harder_reasoning_math
+      label: "Harder reasoning/math"
+      count: 40
+
+    - name: code_variations
+      label: "Code variations"
+      count: 30
+
+    - name: held_out_domain_task
+      label: "Held-out domain/task combinations"
+      count: 30
+
+  split:
+    stress: 300
+
+
+# ---------------------------------------------------------------------------
+# SPLIT INTEGRITY
+# ---------------------------------------------------------------------------
+
+splitting:
+  unit: prompt
+
+  # All model outcomes belonging to the same prompt_id must remain
+  # in the same split.
+  leakage_guard: true
+
+  allowed_splits:
+    - train
+    - validation
+    - test
+    - stress
+
+
+# ---------------------------------------------------------------------------
+# SOURCE DATASETS
+#
+# Exact versions/configurations will be pinned during ingestion.
+# The source_id/source_split fields will preserve provenance for every
+# sampled prompt.
+# ---------------------------------------------------------------------------
+
+source_datasets:
+
+  - name: mmlu
+    version: null
+    config: null
+    covers:
+      - general_qa
+
+  - name: gsm8k
+    version: null
+    config: null
+    covers:
+      - math
+
+  - name: math
+    version: null
+    config: null
+    covers:
+      - math
+
+  - name: humaneval
+    version: null
+    config: null
+    covers:
+      - coding
+
+  - name: mbpp
+    version: null
+    config: null
+    covers:
+      - coding
+
+  - name: bbh
+    version: null
+    config: null
+    covers:
+      - reasoning
+
+  - name: ifeval
+    version: null
+    config: null
+    covers:
+      - instruction_following
+
+  - name: cnn_dailymail
+    version: null
+    config: null
+    covers:
+      - summarization
+
+  - name: boolq
+    version: null
+    config: null
+    covers:
+      - classification_extraction
+
+  - name: super_glue
+    version: null
+    config: null
+    covers:
+      - classification_extraction
+
+  - name: hellaswag
+    version: null
+    config: null
+    covers:
+      - other
+
+
+# ---------------------------------------------------------------------------
+# REFERENCE-ONLY ROUTING BENCHMARKS
+#
+# These are used for methodology comparison/research.
+# Their routing labels are NOT used as our training labels.
+# ---------------------------------------------------------------------------
+
+reference_only:
+  - name: llmrouterbench
+    purpose: methodology_reference
+
+  - name: xroutebench
+    purpose: methodology_reference
+
+  - name: routerarena
+    purpose: final_evaluation_reference
+
+
+# ---------------------------------------------------------------------------
+# SAMPLING STRATEGY
+# ---------------------------------------------------------------------------
+
+sampling:
+  strategy: stratified
+
+  # Primary stratification dimensions.
+  stratify_by:
+    - category
+    - difficulty
+
+  # Remove exact and near-duplicate prompts across the benchmark.
+  dedup: true
+
+  # Leave unlimited for the initial core benchmark.
+  # Stress-set-specific token limits will be defined separately
+  # when the stress generation pipeline is implemented.
+  max_prompt_tokens: null
+
+  shuffle: true
+
+
+# ---------------------------------------------------------------------------
+# PROVENANCE / EVALUATION
+#
+# These fields define what the ingestion pipeline must preserve.
+# ---------------------------------------------------------------------------
+
+provenance:
+  required_fields:
+    - prompt_id
+    - prompt
+    - task_type
+    - domain
+    - difficulty
+    - source_dataset
+    - source_config
+    - source_split
+    - source_id
+    - split
+
+
+evaluation:
+  allowed_types:
+    - exact_match
+    - multiple_choice
+    - code_execution
+    - ifeval
+    - reference_based
+    - llm_judge
