@@ -40,12 +40,14 @@ class SplitGuard:
         - validation ∩ test = empty
         - core ∩ stress = empty (for untransformed or original source IDs)
         """
-        def get_keys(items: list[BenchmarkPrompt], use_original: bool = False) -> set[tuple[str, str]]:
+        def get_keys(items: list[BenchmarkPrompt], use_original: bool = False) -> set[tuple[str, str, str, str]]:
             keys = set()
             for item in items:
                 ds = item.original_source_dataset if (use_original and item.original_source_dataset) else item.source_dataset
+                cfg = item.source_config or ""
+                split = item.source_split or ""
                 sid = item.original_source_id if (use_original and item.original_source_id) else item.source_id
-                keys.add((ds, sid))
+                keys.add((ds, cfg, split, sid))
             return keys
 
         train_keys = get_keys(train_items)

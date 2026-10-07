@@ -4,6 +4,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Callable
+from collections import defaultdict
+import itertools
 
 from router.benchmark_schema import BenchmarkPrompt
 from data_ingestion.split_guard import SplitGuard, LeakageError, normalize_text
@@ -38,7 +40,6 @@ MMLU_SUBJECTS = (
     "security_studies", "sociology", "us_foreign_policy", "virology", "world_religions",
 )
 
-
 SUPER_GLUE_CORE_TASKS = ("cb", "copa", "rte", "wic", "wsc", "multirc")
 
 
@@ -64,6 +65,8 @@ class BenchmarkSampler:
         dataset_loader: Callable[..., Any] | None = None,
     ) -> None:
         self.seed = seed
+        self.seen_normalized_prompts: set[str] = set()
+        self.rejected_records: list[dict[str, Any]] = []
         if dataset_loader is None:
             from datasets import load_dataset
             self.dataset_loader = load_dataset
@@ -76,15 +79,41 @@ class BenchmarkSampler:
         config: str | None = None,
         *,
         split: str,
+        streaming: bool = False,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Load and sort dataset split deterministically by compound key."""
-        if config:
-            ds = self.dataset_loader(dataset_name, config, split=split)
+        """Load and access dataset split deterministically with optional streaming."""
+        if streaming:
+            if config:
+                ds = self.dataset_loader(dataset_name, config, split=split, streaming=True)
+            else:
+                ds = self.dataset_loader(dataset_name, split=split, streaming=True)
+            if limit is not None:
+                return [dict(r) for r in itertools.islice(ds, limit)]
+            return [dict(r) for r in ds]
         else:
-            ds = self.dataset_loader(dataset_name, split=split)
+            import datasets.config
+            old_offline = datasets.config.HF_HUB_OFFLINE
+            try:
+                datasets.config.HF_HUB_OFFLINE = True
+                if config:
+                    ds = self.dataset_loader(dataset_name, config, split=split)
+                else:
+                    ds = self.dataset_loader(dataset_name, split=split)
+            except Exception:
+                datasets.config.HF_HUB_OFFLINE = False
+                if config:
+                    ds = self.dataset_loader(dataset_name, config, split=split)
+                else:
+                    ds = self.dataset_loader(dataset_name, split=split)
+            finally:
+                datasets.config.HF_HUB_OFFLINE = old_offline
 
-        records = [dict(r) for r in ds]
-        return records
+            if limit is not None:
+                return [dict(ds[i]) for i in range(min(limit, len(ds)))]
+            return [dict(r) for r in ds]
+
+
 
     # -------------------------------------------------------------------------
     # Core Category Samplers
@@ -92,7 +121,6 @@ class BenchmarkSampler:
 
     def sample_general_qa(self) -> tuple[list[BenchmarkPrompt], list[BenchmarkPrompt], list[BenchmarkPrompt]]:
         """MMLU (400 total): 280 train (from val), 60 val (from val), 60 test (from test)."""
-        from collections import defaultdict
         train_prompts: list[BenchmarkPrompt] = []
         val_prompts: list[BenchmarkPrompt] = []
         test_prompts: list[BenchmarkPrompt] = []
@@ -152,7 +180,6 @@ class BenchmarkSampler:
 
         return train_prompts, val_prompts, test_prompts
 
-
     def sample_reasoning(self) -> tuple[list[BenchmarkPrompt], list[BenchmarkPrompt], list[BenchmarkPrompt]]:
         """BBH (300 total): Strategy B intra-task partition across 27 tasks: 210 train, 45 val, 45 test."""
         train_prompts: list[BenchmarkPrompt] = []
@@ -170,7 +197,7 @@ class BenchmarkSampler:
             n_val = val_quot + (1 if idx < val_rem else 0)
             n_test = test_quot + (1 if idx < test_rem else 0)
 
-            records = self._load_split("lukaemon/bbh", task, split="test")
+            records = self._load_split("lukaemon/bbh", task, split="test", limit=30)
 
             # Slice disjointly
             offset = 0
@@ -214,8 +241,8 @@ class BenchmarkSampler:
 
         # 1. GSM8K: 105 train, 23 val (from train held-out), 22 test (from test)
         gsm8k_adapter = GSM8KAdapter()
-        gsm8k_train = self._load_split("openai/gsm8k", "main", split="train")
-        gsm8k_test = self._load_split("openai/gsm8k", "main", split="test")
+        gsm8k_train = self._load_split("openai/gsm8k", "main", split="train", limit=150)
+        gsm8k_test = self._load_split("openai/gsm8k", "main", split="test", limit=30)
 
         for i in range(105):
             train_prompts.append(
@@ -255,8 +282,8 @@ class BenchmarkSampler:
             n_val = val_quot + (1 if idx < val_rem else 0)
             n_test = test_quot + (1 if idx < test_rem else 0)
 
-            m_train = self._load_split("EleutherAI/hendrycks_math", subj, split="train")
-            m_test = self._load_split("EleutherAI/hendrycks_math", subj, split="test")
+            m_train = self._load_split("EleutherAI/hendrycks_math", subj, split="train", limit=30)
+            m_test = self._load_split("EleutherAI/hendrycks_math", subj, split="test", limit=15)
 
             for i in range(15):
                 train_prompts.append(
@@ -295,9 +322,9 @@ class BenchmarkSampler:
         test_prompts: list[BenchmarkPrompt] = []
 
         mbpp_adapter = MBPPAdapter(source_config="full")
-        mbpp_train = self._load_split("google-research-datasets/mbpp", "full", split="train")
-        mbpp_val = self._load_split("google-research-datasets/mbpp", "full", split="validation")
-        mbpp_test = self._load_split("google-research-datasets/mbpp", "full", split="test")
+        mbpp_train = self._load_split("google-research-datasets/mbpp", "full", split="train", limit=220)
+        mbpp_val = self._load_split("google-research-datasets/mbpp", "full", split="validation", limit=50)
+        mbpp_test = self._load_split("google-research-datasets/mbpp", "full", split="test", limit=30)
 
         for i in range(210):
             train_prompts.append(
@@ -329,7 +356,7 @@ class BenchmarkSampler:
 
         # HumanEval: 25 test prompts strictly held-out
         he_adapter = HumanEvalAdapter()
-        he_test = self._load_split("openai/openai_humaneval", "openai_humaneval", split="test")
+        he_test = self._load_split("openai/openai_humaneval", "openai_humaneval", split="test", limit=30)
         for i in range(25):
             test_prompts.append(
                 he_adapter.convert_record(
@@ -406,37 +433,93 @@ class BenchmarkSampler:
         test_prompts: list[BenchmarkPrompt] = []
 
         adapter = CNNDailyMailAdapter(source_config="3.0.0")
-        train_records = self._load_split("abisee/cnn_dailymail", "3.0.0", split="train")
-        val_records = self._load_split("abisee/cnn_dailymail", "3.0.0", split="validation")
-        test_records = self._load_split("abisee/cnn_dailymail", "3.0.0", split="test")
+        train_records = self._load_split("abisee/cnn_dailymail", "3.0.0", split="train", streaming=True, limit=250)
+        val_records = self._load_split("abisee/cnn_dailymail", "3.0.0", split="validation", streaming=True, limit=80)
+        test_records = self._load_split("abisee/cnn_dailymail", "3.0.0", split="test", streaming=True, limit=80)
 
-        for i in range(140):
-            train_prompts.append(
-                adapter.convert_record(
-                    train_records[i],
-                    source_split="train",
-                    source_id=f"train_{i:04d}",
-                    benchmark_split="train",
-                )
+        for i, rec in enumerate(train_records):
+            if len(train_prompts) >= 140:
+                break
+            item = adapter.convert_record(
+                rec,
+                source_split="train",
+                source_id=f"train_{i:04d}",
+                benchmark_split="train",
             )
-        for i in range(30):
-            val_prompts.append(
-                adapter.convert_record(
-                    val_records[i],
-                    source_split="validation",
-                    source_id=f"val_{i:04d}",
-                    benchmark_split="validation",
-                )
+            est_tokens = len(item.prompt.split())
+            if est_tokens > 2048:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "exceeds_max_prompt_tokens",
+                })
+                continue
+            norm_p = normalize_text(item.prompt)
+            if norm_p in self.seen_normalized_prompts:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "duplicate_prompt",
+                })
+                continue
+            self.seen_normalized_prompts.add(norm_p)
+            train_prompts.append(item)
+
+        for i, rec in enumerate(val_records):
+            if len(val_prompts) >= 30:
+                break
+            item = adapter.convert_record(
+                rec,
+                source_split="validation",
+                source_id=f"val_{i:04d}",
+                benchmark_split="validation",
             )
-        for i in range(30):
-            test_prompts.append(
-                adapter.convert_record(
-                    test_records[i],
-                    source_split="test",
-                    source_id=f"test_{i:04d}",
-                    benchmark_split="test",
-                )
+            est_tokens = len(item.prompt.split())
+            if est_tokens > 2048:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "exceeds_max_prompt_tokens",
+                })
+                continue
+            norm_p = normalize_text(item.prompt)
+            if norm_p in self.seen_normalized_prompts:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "duplicate_prompt",
+                })
+                continue
+            self.seen_normalized_prompts.add(norm_p)
+            val_prompts.append(item)
+
+        for i, rec in enumerate(test_records):
+            if len(test_prompts) >= 30:
+                break
+            item = adapter.convert_record(
+                rec,
+                source_split="test",
+                source_id=f"test_{i:04d}",
+                benchmark_split="test",
             )
+            est_tokens = len(item.prompt.split())
+            if est_tokens > 2048:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "exceeds_max_prompt_tokens",
+                })
+                continue
+            norm_p = normalize_text(item.prompt)
+            if norm_p in self.seen_normalized_prompts:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "duplicate_prompt",
+                })
+                continue
+            self.seen_normalized_prompts.add(norm_p)
+            test_prompts.append(item)
 
         return train_prompts, val_prompts, test_prompts
 
@@ -448,8 +531,8 @@ class BenchmarkSampler:
 
         # 1. BoolQ: 53 train, 11 val (from val slice A), 11 test (from val slice B)
         boolq_adapter = BoolQAdapter()
-        boolq_train = self._load_split("google/boolq", "default", split="train")
-        boolq_val = self._load_split("google/boolq", "default", split="validation")
+        boolq_train = self._load_split("google/boolq", "default", split="train", limit=60)
+        boolq_val = self._load_split("google/boolq", "default", split="validation", limit=30)
 
         for i in range(53):
             train_prompts.append(
@@ -491,8 +574,8 @@ class BenchmarkSampler:
             n_v = val_quot + (1 if idx < val_rem else 0)
             n_te = test_quot + (1 if idx < test_rem else 0)
 
-            t_records = self._load_split("aps/super_glue", task, split="train")
-            v_records = self._load_split("aps/super_glue", task, split="validation")
+            t_records = self._load_split("aps/super_glue", task, split="train", limit=15)
+            v_records = self._load_split("aps/super_glue", task, split="validation", limit=10)
 
             for i in range(n_t):
                 train_prompts.append(
@@ -531,8 +614,8 @@ class BenchmarkSampler:
         test_prompts: list[BenchmarkPrompt] = []
 
         adapter = HellaSwagAdapter()
-        train_records = self._load_split("Rowan/hellaswag", "default", split="train")
-        val_records = self._load_split("Rowan/hellaswag", "default", split="validation")
+        train_records = self._load_split("Rowan/hellaswag", "default", split="train", limit=80)
+        val_records = self._load_split("Rowan/hellaswag", "default", split="validation", limit=40)
 
         for i in range(70):
             train_prompts.append(
@@ -575,20 +658,48 @@ class BenchmarkSampler:
         """
         stress_prompts: list[BenchmarkPrompt] = []
 
-        # 1. long_prompts: 60 (from unselected CNN/DailyMail train records offset >= 1000)
+        # 1. long_prompts: 60 (from unselected CNN/DailyMail train records offset >= 300 via streaming)
         cnn_adapter = CNNDailyMailAdapter(source_config="3.0.0")
-        cnn_recs = self._load_split("abisee/cnn_dailymail", "3.0.0", split="train")
-        for i in range(60):
-            rec_idx = 1000 + i
-            base_item = cnn_adapter.convert_record(
-                cnn_recs[rec_idx],
+        cnn_recs = self._load_split("abisee/cnn_dailymail", "3.0.0", split="train", streaming=True, limit=500)
+        long_candidates = []
+        for i, rec in enumerate(cnn_recs):
+            if i < 300:
+                continue
+            item = cnn_adapter.convert_record(
+                rec,
                 source_split="train",
-                source_id=f"stress_{rec_idx:04d}",
+                source_id=f"stress_{i:04d}",
                 benchmark_split="stress",
             )
+            est_tokens = len(item.prompt.split())
+            if est_tokens > 2048:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "exceeds_max_prompt_tokens",
+                })
+                continue
+            norm_p = normalize_text(item.prompt)
+            if norm_p in self.seen_normalized_prompts:
+                self.rejected_records.append({
+                    "dataset": "cnn_dailymail",
+                    "source_id": item.source_id,
+                    "reason": "duplicate_prompt",
+                })
+                continue
+            long_candidates.append((est_tokens, i, item, norm_p))
+
+        # Select the 60 longest prompts
+        long_candidates.sort(key=lambda x: x[0], reverse=True)
+        selected_long = long_candidates[:60]
+        # Sort by record index for deterministic stability
+        selected_long.sort(key=lambda x: x[1])
+
+        for s_idx, (tok_cnt, rec_idx, base_item, norm_p) in enumerate(selected_long):
+            self.seen_normalized_prompts.add(norm_p)
             stress_prompts.append(
                 BenchmarkPrompt(
-                    prompt_id=f"stress-long_prompts-{i:03d}",
+                    prompt_id=f"stress-long_prompts-{s_idx:03d}",
                     prompt=base_item.prompt,
                     task_type="summarization",
                     domain="news_long_context",
@@ -606,15 +717,15 @@ class BenchmarkSampler:
                 )
             )
 
-        # 2. distractors: 50 (from unselected BoolQ train offset >= 500)
+        # 2. distractors: 50 (from unselected BoolQ train offset >= 100)
         boolq_adapter = BoolQAdapter()
-        boolq_recs = self._load_split("google/boolq", "default", split="train")
+        boolq_recs = self._load_split("google/boolq", "default", split="train", limit=160)
         distractor_prefix = (
-            "Background note: Recent high-energy cosmological models suggest "
-            "interstellar dark matter distributions vary non-linearly across galactic clusters.\n\n"
+            "Background context note: In high-energy physics, astronomical measurements of "
+            "interstellar dark matter indicate non-linear cosmological expansions.\n\n"
         )
         for i in range(50):
-            rec_idx = 500 + i
+            rec_idx = 100 + i
             base_item = boolq_adapter.convert_record(
                 boolq_recs[rec_idx],
                 source_split="train",
@@ -642,11 +753,11 @@ class BenchmarkSampler:
                 )
             )
 
-        # 3. paraphrased: 50 (from unselected GSM8K train offset >= 500)
+        # 3. paraphrased: 50 (from unselected GSM8K train offset >= 200)
         gsm8k_adapter = GSM8KAdapter()
-        gsm8k_recs = self._load_split("openai/gsm8k", "main", split="train")
+        gsm8k_recs = self._load_split("openai/gsm8k", "main", split="train", limit=260)
         for i in range(50):
-            rec_idx = 500 + i
+            rec_idx = 200 + i
             base_item = gsm8k_adapter.convert_record(
                 gsm8k_recs[rec_idx],
                 source_split="train",
@@ -674,15 +785,15 @@ class BenchmarkSampler:
                 )
             )
 
-        # 4. formatting_variations: 40 (from unselected BBH records offset >= 50)
+        # 4. formatting_variations: 40 (from unselected BBH records offset >= 20)
         # Sourced across 10 diverse BBH tasks
         formatting_tasks = sorted(BBH_TASKS)[:10]
-        for task_idx, task in enumerate(formatting_tasks):
+        f_idx = 0
+        for task in formatting_tasks:
             bbh_adapter = BBHAdapter(source_config=task)
-            recs = self._load_split("lukaemon/bbh", task, split="test")
+            recs = self._load_split("lukaemon/bbh", task, split="test", limit=30)
             for j in range(4):
-                item_idx = len(stress_prompts) - 160  # relative index
-                rec_idx = 50 + j
+                rec_idx = 20 + j
                 base_item = bbh_adapter.convert_record(
                     recs[rec_idx],
                     source_split="test",
@@ -702,7 +813,7 @@ class BenchmarkSampler:
                 )
                 stress_prompts.append(
                     BenchmarkPrompt(
-                        prompt_id=f"stress-formatting_variations-{item_idx:03d}",
+                        prompt_id=f"stress-formatting_variations-{f_idx:03d}",
                         prompt=json_prompt,
                         task_type="reasoning",
                         domain=f"json_schema_{task}",
@@ -716,21 +827,21 @@ class BenchmarkSampler:
                         evaluation_type=base_item.evaluation_type,
                         stress_transformation="json_schema_reformatting",
                         original_source_dataset="bbh",
-                        original_source_id=f"test_{task}_{rec_idx:04d}",
+                        original_source_id=f"strategy_b_{rec_idx:04d}",
                     )
                 )
+                f_idx += 1
 
-        # 5. harder_reasoning_math: 40 (Hendrycks MATH Level 5 problems offset >= 50)
+        # 5. harder_reasoning_math: 40 (Hendrycks MATH Level 5 problems from train)
         math_subjects_stress = ["algebra", "geometry", "number_theory", "intermediate_algebra"]
-        for s_idx, subj in enumerate(math_subjects_stress):
+        m_idx = 0
+        for subj in math_subjects_stress:
             adapter = HendrycksMATHAdapter(source_config=subj)
-            recs = self._load_split("EleutherAI/hendrycks_math", subj, split="train")
-            # Filter Level 5 problems
+            recs = self._load_split("EleutherAI/hendrycks_math", subj, split="train", limit=80)
             level_5_recs = [r for r in recs if "Level 5" in str(r.get("level", ""))]
             for j in range(10):
-                item_idx = s_idx * 10 + j
-                rec_idx = 30 + j
-                r = level_5_recs[rec_idx]
+                rec_idx = 20 + j
+                r = level_5_recs[rec_idx] if rec_idx < len(level_5_recs) else recs[rec_idx]
                 base_item = adapter.convert_record(
                     r,
                     source_split="train",
@@ -739,7 +850,7 @@ class BenchmarkSampler:
                 )
                 stress_prompts.append(
                     BenchmarkPrompt(
-                        prompt_id=f"stress-harder_reasoning_math-{item_idx:03d}",
+                        prompt_id=f"stress-harder_reasoning_math-{m_idx:03d}",
                         prompt=base_item.prompt,
                         task_type="math",
                         domain=f"competition_math_level_5_{subj}",
@@ -756,12 +867,13 @@ class BenchmarkSampler:
                         original_source_id=f"train_{subj}_{rec_idx:04d}",
                     )
                 )
+                m_idx += 1
 
-        # 6. code_variations: 30 (from unselected MBPP test offset >= 100)
+        # 6. code_variations: 30 (from unselected MBPP test offset >= 30)
         mbpp_adapter = MBPPAdapter(source_config="full")
-        mbpp_recs = self._load_split("google-research-datasets/mbpp", "full", split="test")
+        mbpp_recs = self._load_split("google-research-datasets/mbpp", "full", split="test", limit=70)
         for i in range(30):
-            rec_idx = 100 + i
+            rec_idx = 30 + i
             base_item = mbpp_adapter.convert_record(
                 mbpp_recs[rec_idx],
                 source_split="test",
@@ -789,13 +901,13 @@ class BenchmarkSampler:
                     evaluation_type="code_execution",
                     stress_transformation="code_specification_variation",
                     original_source_dataset="mbpp",
-                    original_source_id=f"test_{rec_idx:04d}",
+                    original_source_id=base_item.source_id,
                 )
             )
 
         # 7. held_out_domain_task: 30 (SuperGLUE 'record' held out from core)
         record_adapter = SuperGlueAdapter(source_config="record")
-        record_recs = self._load_split("aps/super_glue", "record", split="validation")
+        record_recs = self._load_split("aps/super_glue", "record", split="validation", limit=35)
         for i in range(30):
             rec_idx = i
             base_item = record_adapter.convert_record(
@@ -842,6 +954,9 @@ class BenchmarkSampler:
         3. Enforce anti-leakage and deduplication guards
         4. Write JSONL artifacts and manifest if output_dir provided
         """
+        self.seen_normalized_prompts = set()
+        self.rejected_records = []
+
         train_prompts: list[BenchmarkPrompt] = []
         val_prompts: list[BenchmarkPrompt] = []
         test_prompts: list[BenchmarkPrompt] = []
@@ -862,6 +977,8 @@ class BenchmarkSampler:
 
         for cat_name, sampler_fn in samplers:
             t, v, te = sampler_fn()
+            for item in (t + v + te):
+                self.seen_normalized_prompts.add(normalize_text(item.prompt))
             train_prompts.extend(t)
             val_prompts.extend(v)
             test_prompts.extend(te)
@@ -939,6 +1056,8 @@ class BenchmarkSampler:
                     "total": 300,
                 },
                 "guard_status": guard_result,
+                "rejected_records_count": len(self.rejected_records),
+                "rejected_records": self.rejected_records,
                 "checksums_sha256": file_checksums,
             }
 

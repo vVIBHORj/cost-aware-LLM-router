@@ -271,10 +271,8 @@ sampling:
   # Remove exact and near-duplicate prompts across the benchmark.
   dedup: true
 
-  # Leave unlimited for the initial core benchmark.
-  # Stress-set-specific token limits will be defined separately
-  # when the stress generation pipeline is implemented.
-  max_prompt_tokens: null
+  # Enforce max prompt token threshold per policy v1 (CNN/DailyMail threshold)
+  max_prompt_tokens: 2048
 
   shuffle: true
 
