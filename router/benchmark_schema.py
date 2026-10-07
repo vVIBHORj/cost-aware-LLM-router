@@ -54,6 +54,11 @@ class BenchmarkPrompt(BaseModel):
     # Determines which scorer should be used.
     evaluation_type: EvaluationType
 
+    # Optional stress provenance
+    stress_transformation: str | None = None
+    original_source_dataset: str | None = None
+    original_source_id: str | None = None
+
     @field_validator(
         "prompt",
         "domain",
@@ -70,7 +75,13 @@ class BenchmarkPrompt(BaseModel):
 
         return value
 
-    @field_validator("source_config", "expected_output")
+    @field_validator(
+        "source_config",
+        "expected_output",
+        "stress_transformation",
+        "original_source_dataset",
+        "original_source_id",
+    )
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -78,4 +89,4 @@ class BenchmarkPrompt(BaseModel):
 
         value = value.strip()
 
-        return value if value else None
+        return value if value else None
