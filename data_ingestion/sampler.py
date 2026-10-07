@@ -43,6 +43,11 @@ MMLU_SUBJECTS = (
 SUPER_GLUE_CORE_TASKS = ("cb", "copa", "rte", "wic", "wsc", "multirc")
 
 
+def compute_ifeval_hash(key: Any, seed: int = 42) -> int:
+    """Deterministic IFEval partition hash based on 'ifeval:{key}:{seed}' modulo 100."""
+    return int(hashlib.sha256(f"ifeval:{key}:{seed}".encode()).hexdigest(), 16) % 100
+
+
 def compute_file_sha256(path: Path) -> str:
     """Compute standard SHA-256 checksum of a file."""
     h = hashlib.sha256()
@@ -385,7 +390,7 @@ class BenchmarkSampler:
 
         for r in sorted(records, key=lambda x: x["key"]):
             key = r["key"]
-            h = int(hashlib.sha256(f"ifeval:{key}:{self.seed}".encode()).hexdigest(), 16) % 100
+            h = compute_ifeval_hash(key, self.seed)
             if h < 70:
                 train_candidates.append(r)
             elif h < 85:
@@ -562,11 +567,11 @@ class BenchmarkSampler:
                 )
             )
 
-        # 2. SuperGLUE non-boolq: 52 train, 11 val, 12 test
+        # 2. SuperGLUE non-boolq: 52 train, 12 val, 11 test
         n_tasks = len(SUPER_GLUE_CORE_TASKS)  # 6 tasks: cb, copa, rte, wic, wsc, multirc
         train_quot, train_rem = divmod(52, n_tasks) # 8, 4 -> 4 get 9, 2 get 8
-        val_quot, val_rem = divmod(11, n_tasks)     # 1, 5 -> 5 get 2, 1 gets 1
-        test_quot, test_rem = divmod(12, n_tasks)   # 2, 0 -> all 6 get 2
+        val_quot, val_rem = divmod(12, n_tasks)     # 2, 0 -> all 6 get 2
+        test_quot, test_rem = divmod(11, n_tasks)   # 1, 5 -> 5 get 2, 1 gets 1
 
         for idx, task in enumerate(SUPER_GLUE_CORE_TASKS):
             adapter = SuperGlueAdapter(source_config=task)
@@ -687,6 +692,7 @@ class BenchmarkSampler:
                     "reason": "duplicate_prompt",
                 })
                 continue
+            self.seen_normalized_prompts.add(norm_p)
             long_candidates.append((est_tokens, i, item, norm_p))
 
         # Select the 60 longest prompts
