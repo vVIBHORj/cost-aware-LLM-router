@@ -51,8 +51,8 @@ def benchmark_data():
 # 1. Exact split counts
 def test_exact_split_counts(benchmark_data, manifest):
     assert len(benchmark_data["train"]) == 1400
-    assert len(benchmark_data["validation"]) == 300
-    assert len(benchmark_data["test"]) == 300
+    assert len(benchmark_data["validation"]) == 299
+    assert len(benchmark_data["test"]) == 301
     assert len(benchmark_data["stress"]) == 300
     assert manifest["counts"]["grand_total"] == 2300
     assert manifest["counts"]["core_total"] == 2000
@@ -73,6 +73,9 @@ def test_exact_category_quotas(benchmark_data, manifest):
     assert cat_counts["instruction_following"]["total"] == 250
     assert cat_counts["summarization"]["total"] == 200
     assert cat_counts["classification_extraction"]["total"] == 150
+    assert cat_counts["classification_extraction"]["train"] == 105
+    assert cat_counts["classification_extraction"]["validation"] == 22
+    assert cat_counts["classification_extraction"]["test"] == 23
     assert cat_counts["other"]["total"] == 100
 
     # Sum of all category totals must equal 2000

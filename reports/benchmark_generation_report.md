@@ -11,7 +11,9 @@
 
 ## 1. Executive Summary
 
-A deterministic, reproducible benchmark sampling pipeline was designed and executed to produce the official 2,300-prompt benchmark dataset (2,000 core + 300 held-out stress). All allocations enforce strict directional split preservation, zero evaluation contamination, elimination of unlabelled source splits, prompt deduplication, and complete provenance tracking.
+A deterministic, reproducible benchmark sampling pipeline was executed to produce the official 2,300-prompt benchmark dataset (2,000 core + 300 held-out stress) strictly adhering to the approved specifications of `reports/benchmark_split_policy_v1.md`.
+
+All allocations enforce strict directional split preservation, zero evaluation contamination, elimination of unlabelled source splits, prompt deduplication, and complete provenance tracking.
 
 Two independent benchmark generations from clean initial states produced **100% byte-identical** artifacts and checksums.
 
@@ -24,8 +26,8 @@ Two independent benchmark generations from clean initial states produced **100% 
 | Benchmark Split | Core Prompts | Stress Prompts | Total Prompts | Policy Target | Status |
 |---|---|---|---|---|---|
 | `train` | 1,400 | 0 | 1,400 | 1,400 | **EXACT MATCH** |
-| `validation` | 300 | 0 | 300 | 300 | **EXACT MATCH** |
-| `test` | 300 | 0 | 300 | 300 | **EXACT MATCH** |
+| `validation` | 299 | 0 | 299 | 300* | **EXACT POLICY SUM** (See 2.3) |
+| `test` | 301 | 0 | 301 | 300* | **EXACT POLICY SUM** (See 2.3) |
 | `stress` | 0 | 300 | 300 | 300 | **EXACT MATCH** |
 | **Total** | **2,000** | **300** | **2,300** | **2,300** | **EXACT MATCH** |
 
@@ -39,12 +41,22 @@ Two independent benchmark generations from clean initial states produced **100% 
 | `coding` | 210 | 45 | 45 | **300** | 300 |
 | `instruction_following` | 175 | 37 | 38 | **250** | 250 |
 | `summarization` | 140 | 30 | 30 | **200** | 200 |
-| `classification_extraction` | 105 | 23 | 22 | **150** | 150 |
+| `classification_extraction` | 105 | 22 | 23 | **150** | 150 |
 | `other` | 70 | 15 | 15 | **100** | 100 |
-| **Core Total** | **1,400** | **300** | **300** | **2,000** | **2,000** |
+| **Core Total** | **1,400** | **299** | **301** | **2,000** | **2,000** |
 
-*Note on Validation/Test Balance:*  
-IFEval (250 items: 175/37/38) and Classification (150 items: 105/23/22) each contain half-integer quotient remainders ($250 \times 0.15 = 37.5$, $150 \times 0.15 = 22.5$). Slicing 37 val / 38 test for IFEval and 23 val / 22 test for Classification ensures that overall core validation equals **300** and core test equals **300** precisely without altering any category totals or source boundaries.
+### 2.3 Analysis of Policy Table 7 Arithmetic Discrepancy
+
+In `reports/benchmark_split_policy_v1.md`, Table 7 defines the exact per-category allocations:
+- `instruction_following` (IFEval): 175 train, 37 validation, 38 test (quota: 250). Note: $250 \times 0.15 = 37.5$, so split partitioning allocated 37 to validation and 38 to test (-0.5 val, +0.5 test).
+- `classification_extraction`: 105 train, 22 validation, 23 test (quota: 150). Note: $150 \times 0.15 = 22.5$, so split partitioning allocated 22 to validation and 23 to test (-0.5 val, +0.5 test).
+- All other 6 categories are symmetric across validation and test: 60/60, 45/45, 45/45, 45/45, 30/30, 15/15.
+
+Summing the explicit row entries in Table 7 gives:
+- Validation column: $60 + 45 + 45 + 45 + 37 + 30 + 22 + 15 = 299$
+- Test column: $60 + 45 + 45 + 45 + 38 + 30 + 23 + 15 = 301$
+
+Table 7's bottom summary row stated `1,400 | 300 | 300 | 2,000` due to an arithmetic column-addition oversight in the policy specification itself. The sampler strictly implements the approved row-level specifications, resulting in 299 validation and 301 test.
 
 ---
 
@@ -78,8 +90,8 @@ IFEval (250 items: 175/37/38) and Classification (150 items: 105/23/22) each con
 | `google/boolq` | `default` | `validation` | `validation` | 11 | Validation slice A (0..10) |
 | `google/boolq` | `default` | `validation` | `test` | 11 | Validation slice B (11..21) |
 | `aps/super_glue` | `cb, copa, rte, wic, wsc, multirc` | `train` | `train` | 52 | Prohibits `boolq`; directional train |
-| `aps/super_glue` | `cb, copa, rte, wic, wsc, multirc` | `validation` | `validation` | 12 | Validation slice A |
-| `aps/super_glue` | `cb, copa, rte, wic, wsc, multirc` | `validation` | `test` | 11 | Validation slice B |
+| `aps/super_glue` | `cb, copa, rte, wic, wsc, multirc` | `validation` | `validation` | 11 | Validation slice A |
+| `aps/super_glue` | `cb, copa, rte, wic, wsc, multirc` | `validation` | `test` | 12 | Validation slice B |
 | `Rowan/hellaswag` | `default` | `train` | `train` | 70 | Directional train preservation |
 | `Rowan/hellaswag` | `default` | `validation` | `validation` | 15 | Validation slice A (excludes unlabelled test) |
 | `Rowan/hellaswag` | `default` | `validation` | `test` | 15 | Validation slice B (excludes unlabelled test) |
@@ -163,8 +175,8 @@ Benchmark sampling was run twice from scratch (`Run 1` into `data/processed`, `R
 | File Name | SHA-256 Checksum | Match Status |
 |---|---|---|
 | `benchmark_train.jsonl` | `f6794dabef15ca444c16ee3d38281d519431c9f33346111e3f62d053dfc14718` | **100% Byte-Identical** |
-| `benchmark_validation.jsonl` | `b2b00d37a48814edd709c175e8fc7437ea81461d51870633f631840fe34b0453` | **100% Byte-Identical** |
-| `benchmark_test.jsonl` | `148fd245b226afbbe9db847dcd0f0ab769f3d65d82da018b80791b03c62e5460` | **100% Byte-Identical** |
+| `benchmark_validation.jsonl` | `965eb3ba28c2da511c064bdf4fb3058975bb878288d5171f14cc7dd7aecdc51a` | **100% Byte-Identical** |
+| `benchmark_test.jsonl` | `b29d8cf9b050d0a4faae95170936b3973ee3adcab6ef26c00e5ccf603ef99f7d` | **100% Byte-Identical** |
 | `benchmark_stress.jsonl` | `36a092c32deeccdbc64b57cf969f839bff89c5201efcb4be51c07f66b8fe5747` | **100% Byte-Identical** |
 | `benchmark_manifest.json` | Manifest contents match (counts, checksums, categories, guards) | **100% Identical** |
 
@@ -176,7 +188,7 @@ Full repository test suite execution via `python -m pytest`:
 
 ```
 collected 205 items
-============================= 205 passed in 0.62s =============================
+============================= 205 passed in 0.69s =============================
 ```
 
 - Baseline before sampling layer: **169 passed**
