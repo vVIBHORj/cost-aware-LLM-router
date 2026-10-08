@@ -1,0 +1,14 @@
+# Pricing configuration per 1,000,000 tokens in USD
+# Preserves accounting structure across local and hosted candidate models
+models:
+  qwen3-1.7b:
+    input_per_1m_tokens_usd: 0.0
+    output_per_1m_tokens_usd: 0.0
+
+  qwen3-4b:
+    input_per_1m_tokens_usd: 0.0
+    output_per_1m_tokens_usd: 0.0
+
+  qwen3-8b:
+    input_per_1m_tokens_usd: 0.0
+    output_per_1m_tokens_usd: 0.0
