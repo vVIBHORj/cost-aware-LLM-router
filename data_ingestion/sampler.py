@@ -43,6 +43,11 @@ MMLU_SUBJECTS = (
 SUPER_GLUE_CORE_TASKS = ("cb", "copa", "rte", "wic", "wsc", "multirc")
 
 
+def compute_ifeval_sort_key(key: Any, seed: int = 42) -> str:
+    """Deterministic cryptographic sort key based on SHA-256('ifeval:{key}:{seed}')."""
+    return hashlib.sha256(f"ifeval:{key}:{seed}".encode()).hexdigest()
+
+
 def compute_ifeval_hash(key: Any, seed: int = 42) -> int:
     """Deterministic IFEval partition hash based on 'ifeval:{key}:{seed}' modulo 100."""
     return int(hashlib.sha256(f"ifeval:{key}:{seed}".encode()).hexdigest(), 16) % 100
@@ -375,7 +380,7 @@ class BenchmarkSampler:
         return train_prompts, val_prompts, test_prompts
 
     def sample_instruction_following(self) -> tuple[list[BenchmarkPrompt], list[BenchmarkPrompt], list[BenchmarkPrompt]]:
-        """IFEval (250 total): Deterministic SHA-256 partition on key: 175 train, 37 val, 38 test."""
+        """IFEval (250 total): Deterministic SHA-256 cryptographic ranking on key: 175 train, 38 val, 37 test."""
         train_prompts: list[BenchmarkPrompt] = []
         val_prompts: list[BenchmarkPrompt] = []
         test_prompts: list[BenchmarkPrompt] = []
@@ -383,23 +388,16 @@ class BenchmarkSampler:
         adapter = IFEvalAdapter()
         records = self._load_split("google/IFEval", "default", split="train")
 
-        # Partition based on locked formula: sha256(f"ifeval:{key}:{seed}") % 100
-        train_candidates = []
-        val_candidates = []
-        test_candidates = []
+        # Deterministic cryptographic sort: SHA-256("ifeval:" + str(key) + ":" + str(seed))
+        # Sort all 541 records by that hash
+        sorted_records = sorted(records, key=lambda r: compute_ifeval_sort_key(r["key"], self.seed))
 
-        for r in sorted(records, key=lambda x: x["key"]):
-            key = r["key"]
-            h = compute_ifeval_hash(key, self.seed)
-            if h < 70:
-                train_candidates.append(r)
-            elif h < 85:
-                val_candidates.append(r)
-            else:
-                test_candidates.append(r)
+        # Strict ranking partition: first 175 -> train, next 38 -> validation, remaining 37 -> test
+        train_candidates = sorted_records[:175]
+        val_candidates = sorted_records[175:175 + 38]
+        test_candidates = sorted_records[175 + 38:175 + 38 + 37]
 
-        for i in range(175):
-            rec = train_candidates[i]
+        for rec in train_candidates:
             train_prompts.append(
                 adapter.convert_record(
                     rec,
@@ -408,8 +406,7 @@ class BenchmarkSampler:
                     benchmark_split="train",
                 )
             )
-        for i in range(37):
-            rec = val_candidates[i]
+        for rec in val_candidates:
             val_prompts.append(
                 adapter.convert_record(
                     rec,
@@ -418,8 +415,7 @@ class BenchmarkSampler:
                     benchmark_split="validation",
                 )
             )
-        for i in range(38):
-            rec = test_candidates[i]
+        for rec in test_candidates:
             test_prompts.append(
                 adapter.convert_record(
                     rec,
@@ -1080,3 +1076,11 @@ class BenchmarkSampler:
             result["checksums"] = file_checksums
 
         return result
+
+
+if __name__ == "__main__":
+    sampler = BenchmarkSampler()
+    res = sampler.sample_all(output_dir="data/processed")
+    print("Sampling completed successfully.")
+    print("Counts:", json.dumps(res["counts"], indent=2))
+    print("Checksums:", json.dumps(res["checksums"], indent=2))

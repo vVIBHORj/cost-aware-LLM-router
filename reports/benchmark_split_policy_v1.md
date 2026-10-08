@@ -59,7 +59,7 @@ The 11 candidate datasets are assigned explicit split-mapping roles based on ver
 | `humaneval` | `openai/openai_humaneval` | `test` (164) | None (no train/val exists) | **Benchmark Test Only** (Zero in Train/Val) |
 | `mbpp` | `google-research-datasets/mbpp` | `train` (374 / 120), `val` (90 / 43), `test` (500 / 257) | `full` excluded if `sanitized` chosen | `train` $\to$ Core Train; `val` $\to$ Core Val; `test` $\to$ Core Test |
 | `bbh` | `lukaemon/bbh` | `test` (6,750 across 27 tasks) | None (no train/val exists) | **Internal Task-Stratified Partition** or **Test-Only** |
-| `ifeval` | `google/IFEval` | `train` (541) | None (no val/test exists) | **Deterministic Hash Partition** across Train/Val/Test |
+| `ifeval` | `google/IFEval` | `train` (541) | None (no val/test exists) | **Deterministic Cryptographic Ranking** across Train (175), Val (38), Test (37) |
 | `cnn_dailymail` | `abisee/cnn_dailymail` | `train` (287,113), `val` (13,368), `test` (11,490) | Versions `1.0.0` / `2.0.0` | `train` $\to$ Core Train; `val` $\to$ Core Val; `test` $\to$ Core Test & Stress |
 | `boolq` | `google/boolq` | `train` (9,427), `validation` (3,270) | Unlabelled test | `train` $\to$ Core Train; `val` $\to$ Core Val/Test |
 | `super_glue` | `aps/super_glue` | `train` (146,032), `validation` (19,233) | `test` (labels = `-1`); `boolq` config | `train` $\to$ Core Train; `val` $\to$ Core Val/Test |
@@ -132,12 +132,16 @@ BIG-Bench Hard (BBH) contains 27 diverse, multi-step algorithmic reasoning tasks
 
 ### 5.2 IFEval Single-Split Policy
 - `google/IFEval` contains 541 prompts, all packaged in a single `train` split.
-- **Policy:** IFEval must be partitioned into three disjoint subsets using a deterministic hash on the native integer `key`:
-  $$h(\text{key}) = \text{SHA256}(\text{"ifeval:"} + \text{str}(\text{key}) + \text{":"} + \text{str}(\text{seed})) \pmod{100}$$
-  - $\text{Train (70\%, 175 prompts)}: h(\text{key}) < 70$
-  - $\text{Val (15\%, 37 prompts)}: 70 \le h(\text{key}) < 85$
-  - $\text{Test (15\%, 38 prompts)}: h(\text{key}) \ge 85$
-- **Result:** Verifiable, leak-free partition with zero runtime variance.
+- **Policy:** IFEval must be partitioned into three disjoint subsets using deterministic cryptographic ranking on the native integer `key` with `seed = 42`:
+  1. For each record, compute the deterministic hexadecimal sort key:
+     $$\text{sort\_key}(\text{key}) = \text{SHA256}(\text{"ifeval:"} + \text{str}(\text{key}) + \text{":"} + \text{str}(\text{seed}))$$
+  2. Sort all 541 records lexicographically by this cryptographic digest.
+  3. Deterministically assign:
+     - $\text{Train (175 prompts)}$: records at sorted indices $0 \dots 174$
+     - $\text{Val (38 prompts)}$: records at sorted indices $175 \dots 212$
+     - $\text{Test (37 prompts)}$: records at sorted indices $213 \dots 249$
+     - $\text{Remaining (291 records)}$: held-out unselected pool (available for stress/evaluation)
+- **Result:** Verifiable, leak-free partition with exact count enforcement (175 train, 38 validation, 37 test) and zero runtime variance.
 
 ### 5.3 BoolQ Duplication Policy
 - The audit proved that `google/boolq` and `aps/super_glue` config `boolq` contain identical data row-for-row.
@@ -197,10 +201,10 @@ Category 4: coding (300 prompts)
 
 Category 5: instruction_following (250 prompts)
   - Sources: google/IFEval
-  - Train Pool (175): google/IFEval [train] (hash partition A: 70%)
-  - Val Pool   (37):  google/IFEval [train] (hash partition B: 15%)
-  - Test Pool  (38):  google/IFEval [train] (hash partition C: 15%)
-  - Rationale: Deterministic key-hashing partition over single available source split.
+  - Train Pool (175): google/IFEval [train] (cryptographic ranking indices 0..174)
+  - Val Pool   (38):  google/IFEval [train] (cryptographic ranking indices 175..212)
+  - Test Pool  (37):  google/IFEval [train] (cryptographic ranking indices 213..249)
+  - Rationale: Deterministic cryptographic key-ranking partition over single available source split.
 
 Category 6: summarization (200 prompts)
   - Sources: abisee/cnn_dailymail (config: 3.0.0)
@@ -234,13 +238,18 @@ Category 8: other (commonsense NLI) (100 prompts)
 | `reasoning` | 210 | 45 | 45 | **300** |
 | `math` | 210 | 45 | 45 | **300** |
 | `coding` | 210 | 45 | 45 | **300** |
-| `instruction_following` | 175 | 37 | 38 | **250** |
+| `instruction_following` | 175 | 38 | 37 | **250** |
 | `summarization` | 140 | 30 | 30 | **200** |
 | `classification_extraction`| 105 | 22 | 23 | **150** |
 | `other` | 70 | 15 | 15 | **100** |
 | **Total Core Benchmark** | **1,400** | **300** | **300** | **2,000** |
 
-*Verification:* The core split targets (1,400 train, 300 validation, 300 test) are **exactly and mathematically satisfied** without requiring any modification to `configs/benchmark.yaml` and without violating source test boundaries.
+*Verification:* The core split targets (1,400 train, 300 validation, 300 test) are **exactly and mathematically satisfied** without requiring any modification to `configs/benchmark.yaml` and without violating source test boundaries:
+- Validation column sum: $60 + 45 + 45 + 45 + 38 + 30 + 22 + 15 = 300$
+- Test column sum: $60 + 45 + 45 + 45 + 37 + 30 + 23 + 15 = 300$
+
+> **Policy Revision Note:**  
+> In the preliminary draft, independent rounding on fractional 15% allocations ($250 \times 0.15 = 37.5$ and $150 \times 0.15 = 22.5$) assigned 37 val / 38 test to IFEval and 22 val / 23 test to classification, causing the column sums to total 299 validation and 301 test while the summary row stated 300/300. The policy was formally corrected by adjusting `instruction_following` to 175 train / 38 validation / 37 test, keeping `classification_extraction` at 105 train / 22 validation / 23 test, thereby rendering the global 1,400 / 300 / 300 benchmark targets and category quotas 100% mathematically consistent.
 
 ---
 
@@ -271,7 +280,7 @@ The 300 stress prompts (`held_out: true`) test router resilience under adverse c
 | `formatting_variations` | 40 | Wrap unselected BBH or IFEval prompts into strict JSON/YAML output schemas. | **STRICT NO** (Derived from unselected pool) | **Perturbation** (Schema shift) |
 | `harder_reasoning_math` | 40 | Sample strictly from Hendrycks MATH **Level 5** competition problems. | **STRICT NO** (Unselected Level 5 problems) | **Domain Shift** (Extreme difficulty) |
 | `code_variations` | 30 | Apply semantic variable renaming and signature refactoring to unselected MBPP tasks. | **STRICT NO** (Unselected task IDs) | **Perturbation** (Code style variation) |
-| `held_out_domain_task` | 30 | Reserve 2 complete BBH tasks (e.g., `dyck_languages`, `web_of_lies`) or SuperGLUE `wsc` exclusively for this stress set. | **STRICT NO** (Entire task excluded from core) | **True OOD** (Unseen task distribution) |
+| `held_out_domain_task` | 30 | Sourced from a complete held-out SuperGLUE task such as `record` (or alternatively 2 complete BBH tasks such as `dyck_languages`, `web_of_lies`), provided the entire task is excluded from core. | **STRICT NO** (Entire task excluded from core) | **True OOD** (Unseen task distribution) |
 
 ### Provenance Tracking for Transformed Stress Records
 When a stress prompt is generated via perturbation (e.g., distractor injection or paraphrasing), its provenance metadata must record:

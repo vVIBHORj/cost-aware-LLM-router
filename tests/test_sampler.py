@@ -7,6 +7,7 @@ from data_ingestion.split_guard import SplitGuard, normalize_text
 from data_ingestion.sampler import (
     BenchmarkSampler,
     compute_ifeval_hash,
+    compute_ifeval_sort_key,
     MMLU_SUBJECTS,
     BBH_TASKS,
     MATH_SUBJECTS,
@@ -51,8 +52,8 @@ def benchmark_data():
 # 1. Exact split counts
 def test_exact_split_counts(benchmark_data, manifest):
     assert len(benchmark_data["train"]) == 1400
-    assert len(benchmark_data["validation"]) == 299
-    assert len(benchmark_data["test"]) == 301
+    assert len(benchmark_data["validation"]) == 300
+    assert len(benchmark_data["test"]) == 300
     assert len(benchmark_data["stress"]) == 300
     assert manifest["counts"]["grand_total"] == 2300
     assert manifest["counts"]["core_total"] == 2000
@@ -71,6 +72,9 @@ def test_exact_category_quotas(benchmark_data, manifest):
     assert cat_counts["math"]["total"] == 300
     assert cat_counts["coding"]["total"] == 300
     assert cat_counts["instruction_following"]["total"] == 250
+    assert cat_counts["instruction_following"]["train"] == 175
+    assert cat_counts["instruction_following"]["validation"] == 38
+    assert cat_counts["instruction_following"]["test"] == 37
     assert cat_counts["summarization"]["total"] == 200
     assert cat_counts["classification_extraction"]["total"] == 150
     assert cat_counts["classification_extraction"]["train"] == 105
@@ -104,21 +108,24 @@ def test_no_prompt_duplicates(benchmark_data):
     SplitGuard.check_prompt_deduplication(all_prompts)
 
 
-# 5. IFEval SHA-256 hash partition correctness
+# 5. IFEval SHA-256 cryptographic ranking partition correctness
 def test_ifeval_hash_partition_logic():
-    # Deterministic SHA-256 partitioning with seed=42
-    # hash < 70 -> train, 70 <= hash < 85 -> val, hash >= 85 -> test
-    h_train = compute_ifeval_hash("10", seed=42)
-    assert 0 <= h_train <= 100
+    # Deterministic cryptographic sort key with seed=42
+    key_sample = compute_ifeval_sort_key("10", seed=42)
+    assert isinstance(key_sample, str) and len(key_sample) == 64
 
     keys = [str(k) for k in range(541)]
-    train_c = sum(1 for k in keys if compute_ifeval_hash(k, 42) < 70)
-    val_c = sum(1 for k in keys if 70 <= compute_ifeval_hash(k, 42) < 85)
-    test_c = sum(1 for k in keys if compute_ifeval_hash(k, 42) >= 85)
+    sorted_keys = sorted(keys, key=lambda k: compute_ifeval_sort_key(k, seed=42))
+    train_slice = sorted_keys[:175]
+    val_slice = sorted_keys[175:175 + 38]
+    test_slice = sorted_keys[175 + 38:175 + 38 + 37]
 
-    assert train_c >= 175
-    assert val_c >= 37
-    assert test_c >= 38
+    assert len(train_slice) == 175
+    assert len(val_slice) == 38
+    assert len(test_slice) == 37
+    assert len(set(train_slice) & set(val_slice)) == 0
+    assert len(set(train_slice) & set(test_slice)) == 0
+    assert len(set(val_slice) & set(test_slice)) == 0
 
 
 # 6. MMLU subject stratification across 57 subjects
