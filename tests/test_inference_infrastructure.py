@@ -314,3 +314,37 @@ def test_smoke_runner_mock_execution(tmp_path):
 
     loaded_parquet = load_outcomes_parquet(tmp_path / "smoke" / "smoke_outcomes.parquet")
     assert len(loaded_parquet) == 60
+
+
+def test_smoke_runner_scoped_splits_and_scoring(tmp_path):
+    from eval.storage import load_scores_parquet
+
+    outcomes, manifest = run_smoke_test(
+        output_dir=tmp_path / "smoke_scored",
+        run_id="scoped-smoke-test-run",
+        use_mock=True,
+        splits=["train"],
+        prompts_per_split=5,
+        score_outcomes=True,
+    )
+
+    assert len(outcomes) == 15
+    assert manifest.expected_outcome_rows == 15
+    assert manifest.actual_outcome_rows == 15
+    assert manifest.number_of_prompts == 5
+    assert manifest.number_of_candidate_models == 3
+    assert manifest.per_split_counts == {"train": 5}
+
+    for model_id, counts in manifest.per_model_counts.items():
+        assert counts["total"] == 5
+        assert counts["success"] == 5
+
+    # Check scores parquet
+    scores_path = tmp_path / "smoke_scored" / "smoke_scores.parquet"
+    assert scores_path.exists()
+    scores = load_scores_parquet(scores_path)
+    assert len(scores) == 15
+    for s in scores:
+        assert s.run_id == "scoped-smoke-test-run"
+        assert s.canonical_key.startswith(s.prompt_id)
+

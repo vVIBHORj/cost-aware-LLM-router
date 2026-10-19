@@ -6,6 +6,7 @@ import json
 
 from router.config import ModelConfig
 from runners.inference import GenerationRequest, GenerationResult, InferenceProvider
+from runners.ollama_runner import OllamaProvider
 
 
 class VLLMProvider(InferenceProvider):
@@ -91,6 +92,7 @@ class VLLMProvider(InferenceProvider):
             "max_tokens": request.max_output_tokens,
             "temperature": request.temperature,
             "seed": request.seed,
+            "stream": False,
         }
         if request.stop:
             payload["stop"] = request.stop

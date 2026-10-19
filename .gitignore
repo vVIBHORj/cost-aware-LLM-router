@@ -45,11 +45,27 @@ data/splits/*
 reports/generated/
 *.log
 
+# Checkpoints and local model weights
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+*.onnx
+
+# Scratch & temporary workspace
+scratch/
+tmp/
+temp/
+
 # IDE & editors
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# AI / IDE Agent configs
+.agents/
+.gemini/
 
 # OS generated files
 .DS_Store

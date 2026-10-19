@@ -109,6 +109,12 @@ def get_backend_diagnostics(
     configured_endpoint = os.environ.get("VLLM_API_BASE")
     endpoint_reachable = check_openai_endpoint(configured_endpoint)
 
+    # 4b. Ollama endpoint
+    from runners.ollama_runner import get_installed_ollama_models, normalize_ollama_base_url
+    ollama_base = normalize_ollama_base_url()
+    ollama_installed_models = get_installed_ollama_models(ollama_base)
+    ollama_reachable = bool(ollama_installed_models or check_openai_endpoint(ollama_base))
+
     # 5. Model registry & candidate models
     registry_loaded = False
     models_info: list[dict[str, Any]] = []
@@ -149,6 +155,9 @@ def get_backend_diagnostics(
         "vllm_version": vllm_version,
         "openai_endpoint_configured": configured_endpoint,
         "openai_endpoint_reachable": endpoint_reachable,
+        "ollama_endpoint": ollama_base,
+        "ollama_endpoint_reachable": ollama_reachable,
+        "ollama_installed_models": ollama_installed_models,
         "model_registry_loaded": registry_loaded,
         "candidate_models": models_info,
     }
@@ -182,6 +191,8 @@ def run_single_model_preflight(
     temperature: float = 0.0,
     seed: int = 42,
     prompt_text: str = "Return exactly the word: TEST",
+    backend: str | None = None,
+    api_base: str | None = None,
 ) -> ModelOutcome:
     """
     Execute ONE candidate model against ONE deterministic trivial prompt
@@ -194,10 +205,20 @@ def run_single_model_preflight(
     if not model_config:
         raise ValueError(f"Model ID '{model_id}' not found in registry.")
 
-    provider = VLLMProvider(
-        model_config=model_config,
-        pricing=pricing_map.get(model_config.id),
-    )
+    effective_backend = (backend or model_config.backend).lower()
+    if effective_backend == "ollama":
+        from runners.ollama_runner import OllamaProvider
+        provider = OllamaProvider(
+            model_config=model_config,
+            pricing=pricing_map.get(model_config.id),
+            api_base=api_base,
+        )
+    else:
+        provider = VLLMProvider(
+            model_config=model_config,
+            pricing=pricing_map.get(model_config.id),
+            api_base=api_base,
+        )
 
     prompt = create_preflight_prompt(prompt_text=prompt_text)
     run_id = f"preflight-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
@@ -253,6 +274,10 @@ def print_diagnostics_report(diag: dict[str, Any]) -> None:
     print(f"vLLM Package Installed  : {diag['vllm_installed']} (version: {diag['vllm_version']})")
     print(f"OpenAI Endpoint Env     : {diag['openai_endpoint_configured'] or 'Not set'}")
     print(f"OpenAI Endpoint Status  : {'Reachable' if diag['openai_endpoint_reachable'] else 'Unreachable / Not configured'}")
+    print(f"Ollama Endpoint Base    : {diag.get('ollama_endpoint', 'Not set')}")
+    print(f"Ollama Endpoint Status  : {'Reachable' if diag.get('ollama_endpoint_reachable') else 'Unreachable'}")
+    ollama_models = diag.get('ollama_installed_models', [])
+    print(f"Ollama Installed Models : {', '.join(ollama_models) if ollama_models else 'None installed'}")
     print(f"Model Registry Loaded   : {diag['model_registry_loaded']}")
     print("\nCandidate Models Status:")
     for m in diag.get("candidate_models", []):
@@ -267,7 +292,9 @@ def print_diagnostics_report(diag: dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Real Model Backend Preflight & Diagnostics")
     parser.add_argument("--json", action="store_true", help="Output diagnostics in JSON format")
-    parser.add_argument("--run-preflight", action="store_true", help="Run contract test on qwen3-1.7b")
+    parser.add_argument("--run-preflight", action="store_true", help="Run contract test on specified model")
+    parser.add_argument("--backend", type=str, default=None, help="Backend to use: ollama or vllm")
+    parser.add_argument("--model-id", type=str, default="qwen3-1.7b", help="Model ID to test (default: qwen3-1.7b)")
     args = parser.parse_args()
 
     diag = get_backend_diagnostics()
@@ -279,8 +306,8 @@ def main() -> None:
     print_diagnostics_report(diag)
 
     if args.run_preflight:
-        print("\nRunning single-model preflight test against 'qwen3-1.7b'...")
-        outcome = run_single_model_preflight()
+        print(f"\nRunning single-model preflight test against '{args.model_id}' (backend={args.backend or 'default'})...")
+        outcome = run_single_model_preflight(model_id=args.model_id, backend=args.backend)
         print(f"Outcome Status  : {outcome.status}")
         print(f"Error Type      : {outcome.error_type}")
         print(f"Error Message   : {outcome.error_message}")
@@ -299,3 +326,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -108,6 +108,13 @@ class InferenceProvider(ABC):
 
         # Check backend availability first
         if not self.is_available():
+            err_type = getattr(self, "_unavailable_error_type", None) or "EngineUnavailableError"
+            err_msg = (
+                getattr(self, "_unavailable_reason", None)
+                or f"Backend '{self.model_config.backend}' is not installed or available in this environment."
+            )
+            backend_str = getattr(self, "backend_name", self.model_config.backend)
+            model_target = getattr(self, "model_tag", self.model_config.model_name)
             outcome = ModelOutcome(
                 run_id=run_id,
                 prompt_id=prompt.prompt_id,
@@ -133,15 +140,15 @@ class InferenceProvider(ABC):
                 time_to_first_token_ms=None,
                 tokens_per_second=None,
                 status="BACKEND_UNAVAILABLE",
-                error_type="EngineUnavailableError",
-                error_message=f"Backend '{self.model_config.backend}' is not installed or available in this environment.",
+                error_type=err_type,
+                error_message=err_msg,
                 retry_count=0,
                 attempt_history=[],
                 input_cost_usd=None,
                 output_cost_usd=None,
                 total_cost_usd=None,
-                backend=self.model_config.backend,
-                model_name=self.model_config.model_name,
+                backend=backend_str,
+                model_name=model_target,
                 inference_engine_version=None,
             )
             return outcome
@@ -204,15 +211,21 @@ class InferenceProvider(ABC):
                 total_latency_ms += attempt_latency
                 final_error_type = type(e).__name__
                 final_error_msg = str(e) or "Inference request failed."
+                attempt_status: ExecutionStatus = "FAILED"
+                if type(e).__name__ in ("InvalidOutputError", "EmptyOutputError", "ReasoningOnlyError"):
+                    attempt_status = "INVALID_OUTPUT"
                 attempts.append({
                     "attempt": attempt_idx + 1,
                     "timestamp": attempt_time,
-                    "status": "FAILED",
+                    "status": attempt_status,
                     "latency_ms": round(attempt_latency, 2),
                     "error": final_error_msg,
                 })
                 if attempt_idx == max_retries:
-                    final_status = "RETRY_EXHAUSTED" if max_retries > 0 else "FAILED"
+                    if attempt_status == "INVALID_OUTPUT":
+                        final_status = "INVALID_OUTPUT"
+                    else:
+                        final_status = "RETRY_EXHAUSTED" if max_retries > 0 else "FAILED"
 
         retry_count = max(0, len(attempts) - 1)
 
@@ -245,8 +258,8 @@ class InferenceProvider(ABC):
             error_message=final_error_msg if final_status != "SUCCESS" else None,
             retry_count=retry_count,
             attempt_history=attempts,
-            backend=self.model_config.backend,
-            model_name=self.model_config.model_name,
+            backend=getattr(self, "backend_name", self.model_config.backend),
+            model_name=getattr(self, "model_tag", self.model_config.model_name),
             inference_engine_version=final_result.engine_version if final_result else None,
         )
 
@@ -256,3 +269,29 @@ class InferenceProvider(ABC):
         )
 
         return outcome
+
+
+def get_inference_provider(
+    model_config: ModelConfig,
+    pricing: dict[str, float] | None = None,
+    api_base: str | None = None,
+) -> InferenceProvider:
+    """Factory to instantiate the appropriate InferenceProvider based on model_config.backend."""
+    import os
+    backend = model_config.backend.lower()
+    if backend == "ollama":
+        from runners.ollama_runner import OllamaProvider
+        return OllamaProvider(model_config=model_config, pricing=pricing, api_base=api_base)
+    elif backend == "vllm":
+        from runners.vllm_runner import VLLMProvider
+        return VLLMProvider(model_config=model_config, pricing=pricing, api_base=api_base)
+    elif backend == "mock":
+        from runners.vllm_runner import MockInferenceProvider
+        return MockInferenceProvider(model_config=model_config, pricing=pricing)
+    else:
+        if os.environ.get("OLLAMA_API_BASE") or os.environ.get("OLLAMA_HOST"):
+            from runners.ollama_runner import OllamaProvider
+            return OllamaProvider(model_config=model_config, pricing=pricing, api_base=api_base)
+        from runners.vllm_runner import VLLMProvider
+        return VLLMProvider(model_config=model_config, pricing=pricing, api_base=api_base)
+
