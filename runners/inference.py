@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from router.benchmark_schema import BenchmarkPrompt
 from router.config import ModelConfig
+from runners.inference_policy import resolve_output_budget, resolve_thinking_mode
 from runners.outcome_schema import ExecutionStatus, ModelOutcome
 
 
@@ -43,6 +44,7 @@ class GenerationRequest(BaseModel):
     seed: int | None = Field(default=42)
     timeout_seconds: float = Field(gt=0.0, default=60.0)
     stop: list[str] | None = None
+    think: bool | None = None
 
 
 class GenerationResult(BaseModel):
@@ -53,11 +55,13 @@ class GenerationResult(BaseModel):
     finish_reason: str | None = None
     prompt_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning_tokens: int | None = None
     total_tokens: int | None = None
     latency_ms: float = Field(ge=0.0, default=0.0)
     time_to_first_token_ms: float | None = None
     tokens_per_second: float | None = None
     engine_version: str | None = None
+    is_truncated: bool = False
     raw_response: Any = None
 
 
@@ -98,13 +102,23 @@ class InferenceProvider(ABC):
         temperature: float = 0.0,
         seed: int = 42,
         timeout_seconds: float = 60.0,
+        max_output_tokens: int | None = None,
+        think: bool | None = None,
     ) -> ModelOutcome:
         """
         Execute one benchmark prompt with bounded retries, telemetry tracking,
         and explicit cost accounting. Returns a validated ModelOutcome.
         """
         request_timestamp = datetime.now(timezone.utc).isoformat()
-        max_output_tokens = self.model_config.limits.max_output_tokens
+        effective_max_tokens = max_output_tokens or resolve_output_budget(
+            task_type=prompt.task_type,
+            evaluation_type=prompt.evaluation_type,
+        )
+        effective_think = resolve_thinking_mode(
+            task_type=prompt.task_type,
+            evaluation_type=prompt.evaluation_type,
+            user_override=think,
+        )
 
         # Check backend availability first
         if not self.is_available():
@@ -129,12 +143,13 @@ class InferenceProvider(ABC):
                 source_id=prompt.source_id,
                 request_timestamp=request_timestamp,
                 prompt_tokens=None,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=effective_max_tokens,
                 temperature=temperature,
                 seed=seed,
                 generated_text="",
                 finish_reason=None,
                 output_tokens=None,
+                reasoning_tokens=None,
                 total_tokens=None,
                 latency_ms=0.0,
                 time_to_first_token_ms=None,
@@ -155,10 +170,11 @@ class InferenceProvider(ABC):
 
         gen_req = GenerationRequest(
             prompt=prompt.prompt,
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=effective_max_tokens,
             temperature=temperature,
             seed=seed,
             timeout_seconds=timeout_seconds,
+            think=effective_think,
         )
 
         attempts: list[dict[str, Any]] = []
@@ -179,16 +195,24 @@ class InferenceProvider(ABC):
                 if not isinstance(result.generated_text, str):
                     raise ValueError("Model output must be a string.")
 
+                attempt_status: ExecutionStatus = "SUCCESS"
+                if result.finish_reason == "length" or result.is_truncated:
+                    attempt_status = "TRUNCATED"
+
                 attempts.append({
                     "attempt": attempt_idx + 1,
                     "timestamp": attempt_time,
-                    "status": "SUCCESS",
+                    "status": attempt_status,
                     "latency_ms": round(attempt_latency, 2),
                     "prompt_tokens": result.prompt_tokens,
                     "output_tokens": result.output_tokens,
+                    "finish_reason": result.finish_reason,
                 })
                 final_result = result
-                final_status = "SUCCESS"
+                final_status = attempt_status
+                if attempt_status == "TRUNCATED":
+                    final_error_type = "TokenLimitExceeded"
+                    final_error_msg = f"Generation reached max_output_tokens limit ({effective_max_tokens})."
                 break
 
             except TimeoutError as e:
@@ -211,7 +235,7 @@ class InferenceProvider(ABC):
                 total_latency_ms += attempt_latency
                 final_error_type = type(e).__name__
                 final_error_msg = str(e) or "Inference request failed."
-                attempt_status: ExecutionStatus = "FAILED"
+                attempt_status = "FAILED"
                 if type(e).__name__ in ("InvalidOutputError", "EmptyOutputError", "ReasoningOnlyError"):
                     attempt_status = "INVALID_OUTPUT"
                 attempts.append({
@@ -228,6 +252,7 @@ class InferenceProvider(ABC):
                         final_status = "RETRY_EXHAUSTED" if max_retries > 0 else "FAILED"
 
         retry_count = max(0, len(attempts) - 1)
+        is_truncated = (final_status == "TRUNCATED") or (final_result.is_truncated if final_result else False)
 
         outcome = ModelOutcome(
             run_id=run_id,
@@ -243,13 +268,15 @@ class InferenceProvider(ABC):
             source_id=prompt.source_id,
             request_timestamp=request_timestamp,
             prompt_tokens=final_result.prompt_tokens if final_result else None,
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=effective_max_tokens,
             temperature=temperature,
             seed=seed,
             generated_text=final_result.generated_text if final_result else "",
             finish_reason=final_result.finish_reason if final_result else None,
             output_tokens=final_result.output_tokens if final_result else None,
+            reasoning_tokens=final_result.reasoning_tokens if final_result else None,
             total_tokens=final_result.total_tokens if final_result else None,
+            is_truncated=is_truncated,
             latency_ms=round(total_latency_ms, 2),
             time_to_first_token_ms=final_result.time_to_first_token_ms if final_result else None,
             tokens_per_second=final_result.tokens_per_second if final_result else None,

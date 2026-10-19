@@ -157,7 +157,7 @@ def test_ollama_request_payload_and_parameters(mock_urlopen, dummy_model_config)
         make_mock_http_response(200, chat_resp_data),
     ]
 
-    provider = OllamaProvider(dummy_model_config)
+    provider = OllamaProvider(dummy_model_config, endpoint_mode="openai")
     gen_req = GenerationRequest(
         prompt="What is the capital of France?",
         max_output_tokens=64,
@@ -185,6 +185,57 @@ def test_ollama_request_payload_and_parameters(mock_urlopen, dummy_model_config)
     assert payload["max_tokens"] == 64
     assert payload["stop"] == ["\n"]
     assert payload["messages"] == [{"role": "user", "content": "What is the capital of France?"}]
+
+
+# 4b. Native Ollama /api/chat payload: options.num_predict, think flag, and done_reason
+@patch("urllib.request.urlopen")
+def test_ollama_native_request_payload_and_parameters(mock_urlopen, dummy_model_config):
+    models_data = {"data": [{"id": "qwen3:1.7b"}]}
+    native_chat_resp = {
+        "model": "qwen3:1.7b",
+        "message": {"role": "assistant", "content": "Paris"},
+        "done": True,
+        "done_reason": "stop",
+        "prompt_eval_count": 15,
+        "eval_count": 3,
+    }
+
+    mock_urlopen.side_effect = [
+        make_mock_http_response(200, models_data),
+        make_mock_http_response(200, native_chat_resp),
+    ]
+
+    provider = OllamaProvider(dummy_model_config, endpoint_mode="native")
+    gen_req = GenerationRequest(
+        prompt="What is the capital of France?",
+        max_output_tokens=128,
+        temperature=0.0,
+        seed=42,
+        think=False,
+    )
+
+    result = provider.generate(gen_req)
+    assert result.generated_text == "Paris"
+    assert result.prompt_tokens == 15
+    assert result.output_tokens == 3
+    assert result.total_tokens == 18
+    assert result.finish_reason == "stop"
+    assert result.is_truncated is False
+
+    # Verify call went to /api/chat with think: false and options.num_predict
+    chat_call = mock_urlopen.call_args_list[1]
+    req_obj = chat_call[0][0]
+    assert req_obj.full_url.endswith("/api/chat")
+    payload = json.loads(req_obj.data.decode("utf-8"))
+
+    assert payload["model"] == "qwen3:1.7b"
+    assert payload["stream"] is False
+    assert payload["think"] is False
+    assert payload["options"]["num_predict"] == 128
+    assert payload["options"]["temperature"] == 0.0
+    assert payload["options"]["seed"] == 42
+    assert payload["messages"] == [{"role": "user", "content": "What is the capital of France?"}]
+
 
 
 # 5. Token usage: present vs absent (do not fabricate zero)

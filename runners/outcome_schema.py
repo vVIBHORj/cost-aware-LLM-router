@@ -10,6 +10,7 @@ ExecutionStatus = Literal[
     "RETRY_EXHAUSTED",
     "INVALID_OUTPUT",
     "BACKEND_UNAVAILABLE",
+    "TRUNCATED",
 ]
 
 
@@ -53,8 +54,14 @@ class ModelOutcome(BaseModel):
     output_tokens: int | None = Field(
         default=None, ge=0, description="Exact completion tokens reported by backend. None if unavailable."
     )
+    reasoning_tokens: int | None = Field(
+        default=None, ge=0, description="Reasoning / thinking tokens if reported by backend. None if unavailable."
+    )
     total_tokens: int | None = Field(
         default=None, ge=0, description="Exact total tokens reported by backend. None if unavailable."
+    )
+    is_truncated: bool = Field(
+        default=False, description="Whether generation ended because of the token limit."
     )
 
     # 4. Performance Telemetry
@@ -105,10 +112,14 @@ class ModelOutcome(BaseModel):
         if self.output_tokens is not None and self.latency_ms > 0 and self.tokens_per_second is None:
             self.tokens_per_second = round((self.output_tokens / (self.latency_ms / 1000.0)), 2)
 
+        # Truncation consistency check
+        if self.finish_reason == "length" or self.status == "TRUNCATED":
+            self.is_truncated = True
+
         # Status validation checks
         if self.status != "SUCCESS":
             if not self.error_type:
-                self.error_type = f"{self.status}_ERROR"
+                self.error_type = "TokenLimitExceeded" if self.status == "TRUNCATED" else f"{self.status}_ERROR"
         return self
 
     def calculate_cost(

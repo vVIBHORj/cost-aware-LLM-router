@@ -193,6 +193,7 @@ def run_single_model_preflight(
     prompt_text: str = "Return exactly the word: TEST",
     backend: str | None = None,
     api_base: str | None = None,
+    think: bool | None = False,
 ) -> ModelOutcome:
     """
     Execute ONE candidate model against ONE deterministic trivial prompt
@@ -229,6 +230,8 @@ def run_single_model_preflight(
         max_retries=1,
         temperature=temperature,
         seed=seed,
+        max_output_tokens=max_output_tokens,
+        think=think,
     )
 
 

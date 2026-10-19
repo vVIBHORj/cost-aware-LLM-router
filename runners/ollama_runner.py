@@ -109,10 +109,12 @@ class OllamaProvider(InferenceProvider):
         pricing: dict[str, float] | None = None,
         api_base: str | None = None,
         tag_mapping: dict[str, str] | None = None,
+        endpoint_mode: str = "native",
     ) -> None:
         super().__init__(model_config, pricing=pricing)
         self.api_base = normalize_ollama_base_url(api_base)
         self.backend_name = "ollama"
+        self.endpoint_mode = endpoint_mode
 
         # Determine exact model tag
         mapping = tag_mapping or DEFAULT_CANDIDATE_TAG_MAP
@@ -128,6 +130,11 @@ class OllamaProvider(InferenceProvider):
         if self.api_base.endswith("/v1"):
             return f"{self.api_base}/chat/completions"
         return f"{self.api_base}/v1/chat/completions"
+
+    @property
+    def native_chat_url(self) -> str:
+        base = self.api_base.removesuffix("/v1")
+        return f"{base}/api/chat"
 
     @property
     def models_url(self) -> str:
@@ -197,26 +204,52 @@ class OllamaProvider(InferenceProvider):
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
         """
-        Execute request against Ollama's OpenAI-compatible /v1/chat/completions endpoint.
+        Execute request against Ollama.
+        Uses native /api/chat by default (supporting think mode toggling, options.num_predict,
+        and done_reason parsing) or /v1/chat/completions when endpoint_mode='openai'.
         """
         if not self.is_available():
             err_cls = ModelNotFoundError if self._unavailable_error_type == "ModelNotFoundError" else RuntimeError
             raise err_cls(self._unavailable_reason or f"Ollama backend unavailable for model '{self.model_tag}'.")
 
-        payload: dict[str, Any] = {
-            "model": self.model_tag,
-            "messages": [{"role": "user", "content": request.prompt}],
-            "max_tokens": request.max_output_tokens,
-            "temperature": request.temperature,
-            "seed": request.seed,
-            "stream": False,
-        }
-        if request.stop:
-            payload["stop"] = request.stop
+        use_native = getattr(self, "endpoint_mode", "native") == "native"
+
+        if use_native:
+            url = self.native_chat_url
+            payload: dict[str, Any] = {
+                "model": self.model_tag,
+                "messages": [{"role": "user", "content": request.prompt}],
+                "stream": False,
+            }
+            if request.think is not None:
+                payload["think"] = request.think
+            options: dict[str, Any] = {
+                "num_predict": request.max_output_tokens,
+                "temperature": request.temperature,
+            }
+            if request.seed is not None:
+                options["seed"] = request.seed
+            if request.stop:
+                options["stop"] = request.stop
+            payload["options"] = options
+        else:
+            url = self.chat_completions_url
+            payload = {
+                "model": self.model_tag,
+                "messages": [{"role": "user", "content": request.prompt}],
+                "max_tokens": request.max_output_tokens,
+                "temperature": request.temperature,
+                "seed": request.seed,
+                "stream": False,
+            }
+            if request.think is not None:
+                payload["think"] = request.think
+            if request.stop:
+                payload["stop"] = request.stop
 
         req_data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            self.chat_completions_url,
+            url,
             data=req_data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -241,7 +274,7 @@ class OllamaProvider(InferenceProvider):
         except urllib.error.URLError as e:
             if isinstance(e.reason, socket.timeout) or "timed out" in str(e.reason).lower():
                 raise TimeoutError(f"Ollama inference request timed out: {e.reason}") from e
-            raise ConnectionError(f"Connection to Ollama failed at {self.chat_completions_url}: {e.reason}") from e
+            raise ConnectionError(f"Connection to Ollama failed at {url}: {e.reason}") from e
         except json.JSONDecodeError as e:
             raise MalformedResponseError(f"Ollama response could not be parsed as JSON: {e}") from e
 
@@ -250,21 +283,51 @@ class OllamaProvider(InferenceProvider):
         if not isinstance(data, dict):
             raise MalformedResponseError(f"Expected dict response from Ollama, got {type(data).__name__}")
 
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise MalformedResponseError(f"Ollama response missing non-empty 'choices' list: {data}")
+        if "message" in data and isinstance(data["message"], dict):
+            # Parse native Ollama /api/chat response
+            msg = data["message"]
+            gen_text = msg.get("content", "")
+            reasoning_content = msg.get("thinking")
+            done_reason = data.get("done_reason")
+            finish_reason = "length" if done_reason == "length" else ("stop" if done_reason == "stop" else done_reason)
+            is_truncated = (done_reason == "length")
 
-        first_choice = choices[0]
-        if not isinstance(first_choice, dict):
-            raise MalformedResponseError(f"Choice entry is not a dict: {first_choice}")
+            p_tokens = data.get("prompt_eval_count") if isinstance(data.get("prompt_eval_count"), int) else None
+            o_tokens = data.get("eval_count") if isinstance(data.get("eval_count"), int) else None
+            tot_tokens = (p_tokens + o_tokens) if (p_tokens is not None and o_tokens is not None) else None
+            reasoning_tokens = len(reasoning_content.split()) if reasoning_content else (0 if request.think is False else None)
 
-        msg = first_choice.get("message")
-        if not isinstance(msg, dict):
-            raise MalformedResponseError(f"Choice missing 'message' object: {first_choice}")
+        elif "choices" in data and isinstance(data["choices"], list) and data["choices"]:
+            # Parse OpenAI-compatible /v1/chat/completions response
+            first_choice = data["choices"][0]
+            if not isinstance(first_choice, dict):
+                raise MalformedResponseError(f"Choice entry is not a dict: {first_choice}")
 
-        gen_text = msg.get("content", "")
-        reasoning_content = msg.get("reasoning_content", "")
-        finish_reason = first_choice.get("finish_reason")
+            msg = first_choice.get("message")
+            if not isinstance(msg, dict):
+                raise MalformedResponseError(f"Choice missing 'message' object: {first_choice}")
+
+            gen_text = msg.get("content", "")
+            reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
+            finish_reason = first_choice.get("finish_reason")
+            is_truncated = (finish_reason == "length")
+
+            usage = data.get("usage")
+            p_tokens = None
+            o_tokens = None
+            tot_tokens = None
+            if isinstance(usage, dict):
+                if isinstance(usage.get("prompt_tokens"), int):
+                    p_tokens = usage["prompt_tokens"]
+                if isinstance(usage.get("completion_tokens"), int):
+                    o_tokens = usage["completion_tokens"]
+                if isinstance(usage.get("total_tokens"), int):
+                    tot_tokens = usage["total_tokens"]
+                elif p_tokens is not None and o_tokens is not None:
+                    tot_tokens = p_tokens + o_tokens
+            reasoning_tokens = None
+        else:
+            raise MalformedResponseError(f"Ollama response missing both 'message' and 'choices': {data}")
 
         # Validate usable output: do not treat empty or reasoning-only responses as success
         if not isinstance(gen_text, str) or not gen_text.strip():
@@ -279,22 +342,6 @@ class OllamaProvider(InferenceProvider):
             if not post_think:
                 raise ReasoningOnlyError("Model output contains only <think> reasoning without a usable answer.")
 
-        # Token telemetry: capture only when backend actually provides integer counts
-        usage = data.get("usage")
-        p_tokens: int | None = None
-        o_tokens: int | None = None
-        tot_tokens: int | None = None
-
-        if isinstance(usage, dict):
-            if isinstance(usage.get("prompt_tokens"), int):
-                p_tokens = usage["prompt_tokens"]
-            if isinstance(usage.get("completion_tokens"), int):
-                o_tokens = usage["completion_tokens"]
-            if isinstance(usage.get("total_tokens"), int):
-                tot_tokens = usage["total_tokens"]
-            elif p_tokens is not None and o_tokens is not None:
-                tot_tokens = p_tokens + o_tokens
-
         tokens_per_second: float | None = None
         if o_tokens is not None and latency_ms > 0.0:
             tokens_per_second = round(o_tokens / (latency_ms / 1000.0), 2)
@@ -304,7 +351,9 @@ class OllamaProvider(InferenceProvider):
             finish_reason=finish_reason,
             prompt_tokens=p_tokens,
             output_tokens=o_tokens,
+            reasoning_tokens=reasoning_tokens,
             total_tokens=tot_tokens,
+            is_truncated=is_truncated,
             latency_ms=round(latency_ms, 2),
             tokens_per_second=tokens_per_second,
             engine_version=f"ollama-{data.get('model', self.model_tag)}",

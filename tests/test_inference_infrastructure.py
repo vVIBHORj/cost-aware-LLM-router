@@ -95,7 +95,7 @@ def test_outcome_schema_required_identity_fields():
 
 
 def test_outcome_schema_status_validation(sample_prompt, candidate_model):
-    valid_statuses = ["SUCCESS", "FAILED", "TIMEOUT", "RETRY_EXHAUSTED", "INVALID_OUTPUT", "BACKEND_UNAVAILABLE"]
+    valid_statuses = ["SUCCESS", "FAILED", "TIMEOUT", "RETRY_EXHAUSTED", "INVALID_OUTPUT", "BACKEND_UNAVAILABLE", "TRUNCATED"]
     for st in valid_statuses:
         o = ModelOutcome(
             run_id="run-001",
@@ -347,4 +347,43 @@ def test_smoke_runner_scoped_splits_and_scoring(tmp_path):
     for s in scores:
         assert s.run_id == "scoped-smoke-test-run"
         assert s.canonical_key.startswith(s.prompt_id)
+
+
+def test_inference_policy_budgets_and_thinking_mode():
+    from runners.inference_policy import resolve_output_budget, resolve_thinking_mode
+
+    assert resolve_output_budget("qa", "multiple_choice") == 768
+    assert resolve_output_budget("classification", "exact_match") == 128
+    assert resolve_output_budget("summarization", "reference_based") == 512
+    assert resolve_output_budget("coding", "code_execution") == 768
+    assert resolve_output_budget("qa", "unknown_type") == 512
+    assert resolve_output_budget("qa", "multiple_choice", user_override=256) == 256
+
+    assert resolve_thinking_mode("qa", "multiple_choice") is False
+    assert resolve_thinking_mode("classification", "exact_match") is False
+    assert resolve_thinking_mode("qa", "multiple_choice", user_override=True) is True
+
+
+def test_truncation_detection_and_status(sample_prompt, candidate_model):
+    from unittest.mock import MagicMock
+    from runners.inference import GenerationResult
+
+    provider = MockInferenceProvider(candidate_model)
+    # Simulate a generation that ended with finish_reason='length'
+    provider.generate = MagicMock(return_value=GenerationResult(
+        generated_text="Incomplete derivation...",
+        finish_reason="length",
+        prompt_tokens=20,
+        output_tokens=64,
+        total_tokens=84,
+        is_truncated=True,
+    ))
+
+    outcome = provider.execute_prompt(sample_prompt, run_id="trunc-run-1")
+    assert outcome.status == "TRUNCATED"
+    assert outcome.is_truncated is True
+    assert outcome.finish_reason == "length"
+    assert outcome.error_type == "TokenLimitExceeded"
+    assert "limit" in outcome.error_message
+
 

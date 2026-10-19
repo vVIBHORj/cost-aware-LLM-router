@@ -56,6 +56,8 @@ def run_smoke_test(
     splits: list[str] | None = None,
     score_outcomes: bool = False,
     timeout_seconds: float = 120.0,
+    think: bool | None = None,
+    max_output_tokens: int | None = None,
 ) -> tuple[list[ModelOutcome], RunManifest]:
     """
     Execute smoke matrix evaluations.
@@ -95,7 +97,7 @@ def run_smoke_test(
     # 5. Execute evaluations (grouped by model to minimize Ollama weights thrashing)
     outcomes: list[ModelOutcome] = []
     per_model_counts: dict[str, dict[str, int]] = {
-        m.id: {"total": 0, "success": 0, "failed": 0, "retries": 0} for m in models
+        m.id: {"total": 0, "success": 0, "failed": 0, "retries": 0, "truncated": 0} for m in models
     }
     per_split_counts: dict[str, int] = {s: 0 for s in target_splits}
     for prompt in prompts:
@@ -111,12 +113,17 @@ def run_smoke_test(
                 temperature=0.0,
                 seed=42,
                 timeout_seconds=timeout_seconds,
+                max_output_tokens=max_output_tokens,
+                think=think,
             )
             outcomes.append(outcome)
 
             per_model_counts[m.id]["total"] += 1
             if outcome.status == "SUCCESS":
                 per_model_counts[m.id]["success"] += 1
+            elif outcome.status == "TRUNCATED":
+                per_model_counts[m.id]["truncated"] += 1
+                per_model_counts[m.id]["failed"] += 1
             else:
                 per_model_counts[m.id]["failed"] += 1
             per_model_counts[m.id]["retries"] += outcome.retry_count
@@ -180,6 +187,9 @@ def main() -> None:
     parser.add_argument("--prompts-per-split", type=int, default=5, help="Number of prompts per split")
     parser.add_argument("--score", action="store_true", help="Score outcomes after inference")
     parser.add_argument("--timeout", type=float, default=120.0, help="Per-prompt timeout in seconds")
+    parser.add_argument("--think", action="store_true", default=None, help="Explicitly enable reasoning / thinking mode")
+    parser.add_argument("--no-think", action="store_false", dest="think", help="Explicitly disable reasoning / thinking mode")
+    parser.add_argument("--max-output-tokens", type=int, default=None, help="Explicit maximum output tokens override")
     parser.add_argument("--run-id", type=str, default=None, help="Custom run ID")
     parser.add_argument("--output-dir", type=str, default="data/outcomes/smoke", help="Output directory")
     args = parser.parse_args()
@@ -195,6 +205,8 @@ def main() -> None:
         splits=split_list,
         score_outcomes=args.score,
         timeout_seconds=args.timeout,
+        think=args.think,
+        max_output_tokens=args.max_output_tokens,
     )
 
     print("Smoke test completed.")

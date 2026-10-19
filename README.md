@@ -7,7 +7,7 @@
 ![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
 ![Pydantic](https://img.shields.io/badge/validation-Pydantic%20v2-E92063?logo=pydantic&logoColor=white)
 ![Backend](https://img.shields.io/badge/backend-Ollama%20%7C%20vLLM-blue)
-![Tests](https://img.shields.io/badge/tests-254%20passed-brightgreen?logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-257%20passed-brightgreen?logo=pytest&logoColor=white)
 ![Benchmark](https://img.shields.io/badge/benchmark-2%2C300%20frozen%20prompts-blueviolet)
 ![Hardware](https://img.shields.io/badge/hardware-Local%20RTX%203050%20%2B%20Zero%20Cloud%20Spend-success)
 
@@ -54,6 +54,7 @@ Running every prompt through the largest available model is computationally wast
 | **Phase 3** | **Scoring & Baselines** | Decoupled `OutcomeScorer`, task-specific metrics (EM, MC, Code, IFEval, Rouge), 4 baseline policies | ✅ **Completed** |
 | **Phase 4A–4E** | **Ollama Backend Integration** | Local Windows-native Ollama provider, model acquisition, real inference diagnostics for Qwen3-1.7B | ✅ **Completed** |
 | **Phase 4F** | **3-Model Validation & Smoke Matrix** | Full acquisition (`qwen3:1.7b`, `qwen3:4b`, `qwen3:8b`), hardware telemetry, 15-prompt smoke matrix & scoring | ✅ **Completed** |
+| **Phase 4G** | **Thinking Mode & Budget Rectification** | Native Ollama `/api/chat` integration (`think: false`), task-specific token budgets, truncation detection, 8B timeout resolution | ✅ **Completed** |
 | **Phase 5** | **Candidate Inference Matrix** | Systematic collection of all candidate model evaluations on benchmark splits | ⏳ *Next Phase* |
 | **Phase 6** | **Router Training & Serving** | Classifier / regressor training, Pareto frontier calibration, FastAPI deployment | ⏳ *Planned* |
 
@@ -126,7 +127,7 @@ All inference is executed natively on Windows 11 without cloud dependencies:
 - **RAM**: 16 GB DDR5 system memory (~15.7 GB visible)
 - **Inference Engine**: Ollama daemon (`http://127.0.0.1:11434`)
 
-### Observed Resource Allocations & Offload Profiles (Phase 4F)
+### Observed Resource Allocations & Offload Profiles
 
 ```
 +-----------------------------------------------------------------------------------------+
@@ -138,7 +139,24 @@ All inference is executed natively on Windows 11 without cloud dependencies:
 +-----------------------------------------------------------------------------------------+
 ```
 
-*Key Insight*: Qwen3 models produce extended internal reasoning traces before answering. At ~9.16 tok/s on CPU offload, prompts generating 2,000+ reasoning tokens require ~200–300s, necessitating appropriate timeout configurations.
+### Thinking Mode & Output Budget Policy (Phase 4G)
+
+Qwen3 models by default emit extended `<think> ... </think>` internal reasoning loops that can produce 2,000+ reasoning tokens per prompt, leading to severe latency and timeouts on hybrid CPU-offloaded models (`qwen3:8b`).
+
+In Phase 4G, the inference layer was upgraded to:
+1. **Native Ollama `/api/chat` Protocol**: Bypasses the OpenAI compatibility layer to reliably enforce top-level `"think": false` for benchmark tasks (MC, QA, classification, extraction), eliminating reasoning token overhead.
+2. **Task-Appropriate Output Budgets**: Dynamically sets `options.num_predict` per task type (e.g., 768 for `multiple_choice`, 512 for `exact_match`, 128 for `classification`).
+3. **Strict Truncation Detection**: Models that exhaust their output budget without finishing receive execution status `TRUNCATED`, with `is_truncated = True`. Truncated outputs are recorded as `SCORING_UNAVAILABLE` with `quality_score = None`, preventing incomplete generations from polluting benchmark evaluations.
+
+#### Phase 4G Validation Matrix (5 Train Prompts × 3 Models)
+
+| Candidate Model | Success Rate | Timeout Rate | Truncation Rate | Median Output Tokens | Median Warm Latency | Scored Quality |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`qwen3:1.7b`** | **100% (5/5)** | **0% (0/5)** | **0% (0/5)** | 379 tokens | **5.79 s** | **1.00 (5/5)** |
+| **`qwen3:4b`** | **0% (0/5)** | **0% (0/5)** | **100% (5/5)** | 768 tokens (capped) | **23.46 s** | N/A *(Guarded)* |
+| **`qwen3:8b`** | **100% (5/5)** | **0% (0/5)** | **0% (0/5)** | 456 tokens | **48.79 s** | **1.00 (5/5)** |
+
+*Key Result*: `qwen3:8b` timeouts were completely resolved (0 timeouts, 0 retries, latencies ~44–74s vs. >120s timeout in 4F), while `qwen3:4b` verbosity was successfully trapped and guarded from corrupting evaluation scores.
 
 ---
 
@@ -232,12 +250,13 @@ cost-aware-llm-router/
 ├── runners/
 │   ├── backend_diagnostics.py  # Local Ollama / vLLM hardware preflight tool
 │   ├── inference.py            # Base provider interface, retry & cost accounting
-│   ├── ollama_runner.py        # Production Ollama HTTP provider
-│   ├── outcome_schema.py       # ModelOutcome & RunManifest schemas
+│   ├── inference_policy.py     # Task-appropriate token budgets & thinking-mode policies
+│   ├── ollama_runner.py        # Production Ollama HTTP provider (native /api/chat)
+│   ├── outcome_schema.py       # ModelOutcome & RunManifest schemas with truncation guards
 │   ├── smoke_runner.py         # Configurable matrix smoke runner
 │   ├── storage.py              # Parquet outcome reader & writer
 │   └── vllm_runner.py          # vLLM provider and MockInferenceProvider
-├── tests/                      # 254 unit and integration tests
+├── tests/                      # 257 unit and integration tests
 ├── pyproject.toml              # Build system, dependencies, and pytest configuration
 └── README.md                   # Project documentation
 ```
@@ -281,16 +300,16 @@ Check installed model tags, endpoint connectivity, and hardware telemetry:
 # Query local Ollama service and hardware
 .venv\Scripts\python -m runners.backend_diagnostics --backend ollama
 
-# Run deterministic single-prompt preflight on a specific model
-.venv\Scripts\python -m runners.backend_diagnostics --backend ollama --run-preflight --model-id qwen3-1.7b
+# Run deterministic single-prompt preflight with thinking disabled
+.venv\Scripts\python -m runners.backend_diagnostics --backend ollama --run-preflight --model-id qwen3-1.7b --no-think --max-output-tokens 32
 ```
 
 ### Running Controlled Smoke Matrix
 
-Execute a quick, verified 15-prompt smoke matrix (5 train prompts $\times$ 3 models) with scoring:
+Execute a quick, verified 15-prompt smoke matrix (5 train prompts $\times$ 3 models) with scoring, task-specific budgets, and thinking mode control:
 
 ```powershell
-.venv\Scripts\python -m runners.smoke_runner --backend ollama --splits train --prompts-per-split 5 --score --timeout 120 --output-dir data/outcomes/smoke
+.venv\Scripts\python -m runners.smoke_runner --backend ollama --splits train --prompts-per-split 5 --score --timeout 120 --no-think --output-dir data/outcomes/smoke_phase4g
 ```
 
 ---
@@ -316,8 +335,9 @@ Verify frozen benchmark integrity:
 - [x] **Phase 1**: Benchmark ingestion, dataset adaptation, stratified splitting, and cryptographic freezing.
 - [x] **Phase 2**: Candidate inference infrastructure, telemetry tracking, retry limits, and Parquet storage.
 - [x] **Phase 3**: Decoupled scoring harness, task metrics, and baseline policy definitions.
-- [x] **Phase 4**: Local Windows GPU inference feasibility, Ollama provider integration, model acquisition, and smoke matrix validation.
+- [x] **Phase 4**: Local Windows GPU inference feasibility, Ollama provider integration, model acquisition, thinking-mode/output budget rectification, and smoke matrix validation.
 - [ ] **Phase 5**: Full candidate evaluation across the 1,400 training prompts.
 - [ ] **Phase 6**: Router model training (cost-quality Pareto optimization) and threshold calibration.
 - [ ] **Phase 7**: Final evaluation on held-out test and stress splits.
 - [ ] **Phase 8**: FastAPI routing microservice deployment.
+
