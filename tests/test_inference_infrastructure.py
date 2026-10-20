@@ -391,6 +391,7 @@ def test_prompt_policy_formatting_and_propagation(sample_prompt, candidate_model
     from runners.inference_policy import (
         PROMPT_POLICY_V0,
         PROMPT_POLICY_V1_CONCISE,
+        PROMPT_POLICY_V2_ANSWER_ONLY,
         format_prompt_with_policy,
     )
 
@@ -404,14 +405,21 @@ def test_prompt_policy_formatting_and_propagation(sample_prompt, candidate_model
     assert "Final Answer: <letter>" in v1_text
     assert "Instruction:" in v1_text
 
+    # v2_answer_only appends answer-only instruction
+    v2_text = format_prompt_with_policy(sample_prompt.prompt, "multiple_choice", "qa", PROMPT_POLICY_V2_ANSWER_ONLY)
+    assert sample_prompt.prompt in v2_text
+    assert "Output only its option letter" in v2_text
+    assert "Instruction:" in v2_text
+
     # Verify execution records prompt_policy_version
     provider = MockInferenceProvider(candidate_model)
     outcome = provider.execute_prompt(
         sample_prompt,
         run_id="policy-run-1",
-        prompt_policy_version=PROMPT_POLICY_V1_CONCISE,
+        prompt_policy_version=PROMPT_POLICY_V2_ANSWER_ONLY,
     )
-    assert outcome.prompt_policy_version == PROMPT_POLICY_V1_CONCISE
+    assert outcome.prompt_policy_version == PROMPT_POLICY_V2_ANSWER_ONLY
+
 
 
 

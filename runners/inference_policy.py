@@ -75,6 +75,7 @@ def resolve_thinking_mode(
 
 PROMPT_POLICY_V0 = "v0"
 PROMPT_POLICY_V1_CONCISE = "v1_concise"
+PROMPT_POLICY_V2_ANSWER_ONLY = "v2_answer_only"
 
 DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
     PROMPT_POLICY_V0: {},
@@ -89,6 +90,17 @@ DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
         ),
         "classification": (
             "Classify the text. Keep the output concise and state only the final label as `Final Answer: <label>`."
+        ),
+    },
+    PROMPT_POLICY_V2_ANSWER_ONLY: {
+        "multiple_choice": (
+            "Select the single best answer. Output only its option letter, with no explanation, reasoning, prefix, or other text."
+        ),
+        "exact_match": (
+            "Output only the final answer, with no explanation, reasoning, units, prefix, or other text."
+        ),
+        "classification": (
+            "Output only the final label, with no explanation, reasoning, prefix, or other text."
         ),
     },
 }
