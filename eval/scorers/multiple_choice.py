@@ -7,13 +7,23 @@ def extract_mc_choice(text: str) -> str | None:
     Extract multiple choice selection from model generation.
     Handles explicit answer phrases, parenthesized choices, standalone letters,
     LaTeX \\boxed{...}, and markdown formatted final answer headers.
+    Prioritizes explicit final answer markers and ignores unanchored words.
     """
     if not text or not text.strip():
         return None
 
     cleaned = text.strip()
 
-    # Pattern 0: LaTeX \\boxed{...} (handles nested braces like \\boxed{\\text{A. 4}})
+    # Pattern 1: Explicit Final Answer statement (take the last occurrence in generation)
+    # e.g. 'Final Answer: B', 'Final Answer: **A**', 'Final Answer: `C`', '### Final Answer:\n**C. 12**', 'Final Answer: Option D'
+    p_final = re.findall(
+        r"(?i)final\s+answer\s*[:\s]*[\*`\s]*(?:option\s+|choice\s+)?\(?([A-Ha-h])\)?(?:[\.\:\)\s\*`]|$)",
+        cleaned,
+    )
+    if p_final:
+        return p_final[-1].upper()
+
+    # Pattern 2: LaTeX \\boxed{...} (take the last boxed block in generation)
     boxed_blocks = re.findall(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", cleaned)
     if boxed_blocks:
         last_boxed = boxed_blocks[-1].strip()
@@ -21,41 +31,47 @@ def extract_mc_choice(text: str) -> str | None:
         if m:
             return m.group(1).upper()
 
-    # Pattern 1: Explicit final answer headers/statements
-    # e.g. "Final Answer: **A**", "### Final Answer: \n**C. 12**", "The answer is (B)"
-    p_final = re.search(
-        r"(?i)(?:final\s+answer|correct\s+answer|the\s+answer\s+is|answer)\s*[:\s]*[\*\s]*\(?([A-Ha-h])\)?(?:[\.\:\)\s\*]|$)",
+    # Pattern 3: Explicit 'The correct answer is (X)' or 'The answer is (X)'
+    p_statement = re.findall(
+        r"(?i)(?:the\s+correct\s+answer\s+is|the\s+answer\s+is)\s*[:\s]*[\*`\s]*(?:option\s+|choice\s+)?\(?([A-Ha-h])\)?",
         cleaned,
     )
-    if p_final:
-        return p_final.group(1).upper()
+    if p_statement:
+        return p_statement[-1].upper()
 
-    # Pattern 2: Option / Choice indicators
-    p2 = re.search(
-        r"(?i)(?:option|choice)\s*[:\s]*\(?([A-Ha-h])\)?(?:[\.\:\)\s\*]|$)",
+    # Pattern 4: Start of line 'Answer:\s*([A-H])' or 'Option:\s*([A-H])' or 'Option D is correct'
+    p_option_correct = re.findall(
+        r"(?i)(?:option|choice)\s+([A-Ha-h])(?:\s+is\s+correct|\b)",
         cleaned,
     )
-    if p2:
-        return p2.group(1).upper()
+    if p_option_correct:
+        return p_option_correct[-1].upper()
 
-    # Pattern 3: Standalone single character response
-    if len(cleaned) <= 5:
-        p3 = re.search(r"\(?([A-Ha-h])\)?", cleaned)
-        if p3:
-            return p3.group(1).upper()
+    p_line_answer = re.findall(
+        r"(?mi)^(?:[#\*\s]*)(?:answer|option|choice)\s*:\s*[\*`\s]*\(?([A-Ha-h])\)?",
+        cleaned,
+    )
+    if p_line_answer:
+        return p_line_answer[-1].upper()
 
-    # Pattern 4: First character formatted as (A) or A. or A:
-    p4 = re.match(r"^\s*\(?([A-Ha-h])\)?[\.\:\)\s]", cleaned)
-    if p4:
-        return p4.group(1).upper()
+    # Pattern 5: Standalone single character / parenthesized response (short string)
+    if len(cleaned) <= 7:
+        p_short = re.search(r"^\s*\(?([A-Ha-h])\)?[\.\:\s]*$", cleaned)
+        if p_short:
+            return p_short.group(1).upper()
 
-    # Pattern 5: Last line contains parenthesized or bold choice: '(A)' or '**A**'
+    # Pattern 6: Leading choice formatted as (A) or A. or A:
+    p_lead = re.match(r"^\s*\(?([A-Ha-h])\)?[\.\:\)\s]", cleaned)
+    if p_lead:
+        return p_lead.group(1).upper()
+
+    # Pattern 7: Very last non-empty line contains parenthesized or bold choice: '(A)' or '**A**'
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     if lines:
-        for line in reversed(lines[-3:]):
-            p5 = re.search(r"(?:\(|(?:\*\*))([A-Ha-h])(?:\)|(?:\*\*))", line)
-            if p5:
-                return p5.group(1).upper()
+        for line in reversed(lines[-2:]):
+            p_last = re.search(r"(?:\(|(?:\*\*))([A-Ha-h])(?:\)|(?:\*\*))", line)
+            if p_last:
+                return p_last.group(1).upper()
 
     return None
 

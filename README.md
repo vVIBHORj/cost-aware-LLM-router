@@ -635,16 +635,6 @@ The project has previously used unit and integration tests for areas such as:
 
 The exact test count can change as the codebase evolves. Use the output from the current checkout as the source of truth; do not rely on a hard-coded badge as proof that tests pass in a new environment.
 
-### Suggested pre-commit checklist
-
-- [ ] All tests pass locally.
-- [ ] Ollama endpoint is reachable.
-- [ ] All three candidate model tags are available.
-- [ ] Benchmark hashes match the frozen manifest.
-- [ ] Smoke-run failures and truncations have been inspected.
-- [ ] Train/validation/test/stress boundaries remain intact.
-- [ ] No generated outcomes, secrets, or raw restricted datasets are accidentally committed.
-
 ---
 
 ## 📈 How Routing Quality Will Be Evaluated

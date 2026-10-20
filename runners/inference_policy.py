@@ -71,3 +71,45 @@ def resolve_thinking_mode(
         return policy[evaluation_type]
 
     return policy["default"]
+
+
+PROMPT_POLICY_V0 = "v0"
+PROMPT_POLICY_V1_CONCISE = "v1_concise"
+
+DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
+    PROMPT_POLICY_V0: {},
+    PROMPT_POLICY_V1_CONCISE: {
+        "multiple_choice": (
+            "Solve the question. Keep the explanation concise and end with `Final Answer: <letter>`. "
+            "Do not repeat the question or provide unnecessary commentary."
+        ),
+        "exact_match": (
+            "Solve the question. Keep the explanation concise and end with `Final Answer: <answer>`. "
+            "Do not repeat the question or provide unnecessary commentary."
+        ),
+        "classification": (
+            "Classify the text. Keep the output concise and state only the final label as `Final Answer: <label>`."
+        ),
+    },
+}
+
+
+def format_prompt_with_policy(
+    prompt_text: str,
+    evaluation_type: str | None = None,
+    task_type: str | None = None,
+    policy_version: str = PROMPT_POLICY_V0,
+) -> str:
+    """
+    Format prompt text according to the specified versioned prompt policy.
+    Leaves original prompt unaltered if policy is 'v0' or unconfigured.
+    """
+    if policy_version == PROMPT_POLICY_V0 or not policy_version:
+        return prompt_text
+
+    policy_map = DEFAULT_PROMPT_POLICY_INSTRUCTIONS.get(policy_version, {})
+    instruction = policy_map.get(evaluation_type) or policy_map.get(task_type)
+    if not instruction:
+        return prompt_text
+
+    return f"{prompt_text}\n\nInstruction: {instruction}"

@@ -59,6 +59,7 @@ def run_smoke_test(
     think: bool | None = None,
     max_output_tokens: int | None = None,
     model_ids: list[str] | None = None,
+    prompt_policy_version: str = "v0",
 ) -> tuple[list[ModelOutcome], RunManifest]:
     """
     Execute smoke matrix evaluations.
@@ -120,6 +121,7 @@ def run_smoke_test(
                 timeout_seconds=timeout_seconds,
                 max_output_tokens=max_output_tokens,
                 think=think,
+                prompt_policy_version=prompt_policy_version,
             )
             outcomes.append(outcome)
 
@@ -160,6 +162,7 @@ def run_smoke_test(
         per_split_counts=per_split_counts,
         token_accounting_available=token_accounting_avail,
         latency_available=latency_avail,
+        prompt_policy_version=prompt_policy_version,
     )
 
     # 6. Save outcomes and manifest
@@ -196,6 +199,7 @@ def main() -> None:
     parser.add_argument("--no-think", action="store_false", dest="think", help="Explicitly disable reasoning / thinking mode")
     parser.add_argument("--max-output-tokens", type=int, default=None, help="Explicit maximum output tokens override")
     parser.add_argument("--models", type=str, default=None, help="Comma-separated list of candidate model IDs")
+    parser.add_argument("--prompt-policy", type=str, default="v0", help="Prompt policy version (e.g. v0, v1_concise)")
     parser.add_argument("--run-id", type=str, default=None, help="Custom run ID")
     parser.add_argument("--output-dir", type=str, default="data/outcomes/smoke", help="Output directory")
     args = parser.parse_args()
@@ -215,6 +219,7 @@ def main() -> None:
         think=args.think,
         max_output_tokens=args.max_output_tokens,
         model_ids=model_list,
+        prompt_policy_version=args.prompt_policy,
     )
 
     print("Smoke test completed.")

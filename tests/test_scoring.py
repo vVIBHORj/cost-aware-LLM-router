@@ -82,6 +82,10 @@ def test_multiple_choice_extraction_and_scoring():
     assert extract_mc_choice(r"\boxed{B. 3}") == "B"
     assert extract_mc_choice("### ✅ Final Answer: **C**") == "C"
     assert extract_mc_choice("### Final Answer:\n**C. 12**") == "C"
+    assert extract_mc_choice("We must answer a very difficult question first. Finally, we conclude.\n\nFinal Answer: B") == "B"
+    assert extract_mc_choice("Final Answer: `B`") == "B"
+    assert extract_mc_choice("Final Answer: Option D") == "D"
+    assert extract_mc_choice("This is a long explanation containing word a and answer without selection.") is None
 
     # Scoring matches
     res1 = score_multiple_choice("The answer is (B).", "B")
@@ -96,6 +100,9 @@ def test_multiple_choice_extraction_and_scoring():
     # Ensure no false positive when the target letter happens to appear in an unselected sentence
     res4 = score_multiple_choice("This is a failure with no explicit answer given.", "A")
     assert res4["quality_score"] == 0.0
+
+    res5 = score_multiple_choice("The item has properties of b in abstract algebra.", "B")
+    assert res5["quality_score"] == 0.0
 
 
 # 3. Code execution safe stub tests

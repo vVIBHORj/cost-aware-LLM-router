@@ -99,6 +99,9 @@ class ModelOutcome(BaseModel):
     inference_engine_version: str | None = Field(
         default=None, description="Version string of inference engine."
     )
+    prompt_policy_version: str | None = Field(
+        default=None, description="Version identifier of prompt instruction policy applied."
+    )
 
     @model_validator(mode="after")
     def validate_tokens_and_status(self) -> "ModelOutcome":
@@ -164,3 +167,4 @@ class RunManifest(BaseModel):
     per_split_counts: dict[str, int]
     token_accounting_available: bool
     latency_available: bool
+    prompt_policy_version: str | None = None

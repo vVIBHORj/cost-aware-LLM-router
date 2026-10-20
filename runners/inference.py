@@ -8,7 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from router.benchmark_schema import BenchmarkPrompt
 from router.config import ModelConfig
-from runners.inference_policy import resolve_output_budget, resolve_thinking_mode
+from runners.inference_policy import (
+    PROMPT_POLICY_V0,
+    format_prompt_with_policy,
+    resolve_output_budget,
+    resolve_thinking_mode,
+)
 from runners.outcome_schema import ExecutionStatus, ModelOutcome
 
 
@@ -45,6 +50,7 @@ class GenerationRequest(BaseModel):
     timeout_seconds: float = Field(gt=0.0, default=60.0)
     stop: list[str] | None = None
     think: bool | None = None
+    prompt_policy_version: str | None = None
 
 
 class GenerationResult(BaseModel):
@@ -104,6 +110,7 @@ class InferenceProvider(ABC):
         timeout_seconds: float = 60.0,
         max_output_tokens: int | None = None,
         think: bool | None = None,
+        prompt_policy_version: str = PROMPT_POLICY_V0,
     ) -> ModelOutcome:
         """
         Execute one benchmark prompt with bounded retries, telemetry tracking,
@@ -118,6 +125,12 @@ class InferenceProvider(ABC):
             task_type=prompt.task_type,
             evaluation_type=prompt.evaluation_type,
             user_override=think,
+        )
+        effective_prompt = format_prompt_with_policy(
+            prompt_text=prompt.prompt,
+            evaluation_type=prompt.evaluation_type,
+            task_type=prompt.task_type,
+            policy_version=prompt_policy_version,
         )
 
         # Check backend availability first
@@ -165,16 +178,18 @@ class InferenceProvider(ABC):
                 backend=backend_str,
                 model_name=model_target,
                 inference_engine_version=None,
+                prompt_policy_version=prompt_policy_version,
             )
             return outcome
 
         gen_req = GenerationRequest(
-            prompt=prompt.prompt,
+            prompt=effective_prompt,
             max_output_tokens=effective_max_tokens,
             temperature=temperature,
             seed=seed,
             timeout_seconds=timeout_seconds,
             think=effective_think,
+            prompt_policy_version=prompt_policy_version,
         )
 
         attempts: list[dict[str, Any]] = []
@@ -288,6 +303,7 @@ class InferenceProvider(ABC):
             backend=getattr(self, "backend_name", self.model_config.backend),
             model_name=getattr(self, "model_tag", self.model_config.model_name),
             inference_engine_version=final_result.engine_version if final_result else None,
+            prompt_policy_version=prompt_policy_version,
         )
 
         outcome.calculate_cost(

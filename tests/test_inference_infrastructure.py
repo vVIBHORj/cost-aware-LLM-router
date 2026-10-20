@@ -387,3 +387,31 @@ def test_truncation_detection_and_status(sample_prompt, candidate_model):
     assert "limit" in outcome.error_message
 
 
+def test_prompt_policy_formatting_and_propagation(sample_prompt, candidate_model):
+    from runners.inference_policy import (
+        PROMPT_POLICY_V0,
+        PROMPT_POLICY_V1_CONCISE,
+        format_prompt_with_policy,
+    )
+
+    # v0 preserves original text
+    v0_text = format_prompt_with_policy(sample_prompt.prompt, "multiple_choice", "qa", PROMPT_POLICY_V0)
+    assert v0_text == sample_prompt.prompt
+
+    # v1_concise appends explicit instruction
+    v1_text = format_prompt_with_policy(sample_prompt.prompt, "multiple_choice", "qa", PROMPT_POLICY_V1_CONCISE)
+    assert sample_prompt.prompt in v1_text
+    assert "Final Answer: <letter>" in v1_text
+    assert "Instruction:" in v1_text
+
+    # Verify execution records prompt_policy_version
+    provider = MockInferenceProvider(candidate_model)
+    outcome = provider.execute_prompt(
+        sample_prompt,
+        run_id="policy-run-1",
+        prompt_policy_version=PROMPT_POLICY_V1_CONCISE,
+    )
+    assert outcome.prompt_policy_version == PROMPT_POLICY_V1_CONCISE
+
+
+
