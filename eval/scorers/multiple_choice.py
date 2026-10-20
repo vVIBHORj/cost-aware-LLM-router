@@ -5,42 +5,57 @@ from typing import Any
 def extract_mc_choice(text: str) -> str | None:
     """
     Extract multiple choice selection from model generation.
-    Handles explicit answer phrases, parenthesized choices, and standalone letters.
+    Handles explicit answer phrases, parenthesized choices, standalone letters,
+    LaTeX \\boxed{...}, and markdown formatted final answer headers.
     """
     if not text or not text.strip():
         return None
 
     cleaned = text.strip()
 
-    # Pattern 1: Explicit answer indicators
-    # "The answer is (A)", "Answer: B", "The correct answer is Option C"
-    p1 = re.search(r"(?i)(?:the\s+correct\s+answer\s+is|the\s+answer\s+is|answer)\s*[:\s]*\(?([A-Za-z0-9])\)?", cleaned)
-    if p1:
-        return p1.group(1).upper()
+    # Pattern 0: LaTeX \\boxed{...} (handles nested braces like \\boxed{\\text{A. 4}})
+    boxed_blocks = re.findall(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", cleaned)
+    if boxed_blocks:
+        last_boxed = boxed_blocks[-1].strip()
+        m = re.search(r"(?i)\b([A-Ha-h])(?:\.|\b)", last_boxed)
+        if m:
+            return m.group(1).upper()
+
+    # Pattern 1: Explicit final answer headers/statements
+    # e.g. "Final Answer: **A**", "### Final Answer: \n**C. 12**", "The answer is (B)"
+    p_final = re.search(
+        r"(?i)(?:final\s+answer|correct\s+answer|the\s+answer\s+is|answer)\s*[:\s]*[\*\s]*\(?([A-Ha-h])\)?(?:[\.\:\)\s\*]|$)",
+        cleaned,
+    )
+    if p_final:
+        return p_final.group(1).upper()
 
     # Pattern 2: Option / Choice indicators
-    p2 = re.search(r"(?i)(?:option|choice)\s*[:\s]*\(?([A-Za-z0-9])\)?", cleaned)
+    p2 = re.search(
+        r"(?i)(?:option|choice)\s*[:\s]*\(?([A-Ha-h])\)?(?:[\.\:\)\s\*]|$)",
+        cleaned,
+    )
     if p2:
         return p2.group(1).upper()
 
     # Pattern 3: Standalone single character response
-    if len(cleaned) <= 3:
-        p3 = re.search(r"[A-Za-z0-9]", cleaned)
+    if len(cleaned) <= 5:
+        p3 = re.search(r"\(?([A-Ha-h])\)?", cleaned)
         if p3:
-            return p3.group(0).upper()
+            return p3.group(1).upper()
 
     # Pattern 4: First character formatted as (A) or A. or A:
-    p4 = re.match(r"^\s*\(?([A-Za-z0-9])\)?[\.\:\)\s]", cleaned)
+    p4 = re.match(r"^\s*\(?([A-Ha-h])\)?[\.\:\)\s]", cleaned)
     if p4:
         return p4.group(1).upper()
 
-    # Pattern 5: Last line contains parenthesized choice: "(A)"
+    # Pattern 5: Last line contains parenthesized or bold choice: '(A)' or '**A**'
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     if lines:
-        last_line = lines[-1]
-        p5 = re.search(r"\(([A-Za-z0-9])\)", last_line)
-        if p5:
-            return p5.group(1).upper()
+        for line in reversed(lines[-3:]):
+            p5 = re.search(r"(?:\(|(?:\*\*))([A-Ha-h])(?:\)|(?:\*\*))", line)
+            if p5:
+                return p5.group(1).upper()
 
     return None
 
@@ -64,15 +79,7 @@ def score_multiple_choice(
 
     pred_choice = extract_mc_choice(prediction)
 
-    # If extraction failed, also test if reference string itself occurs as full word
-    is_match = False
-    if pred_choice is not None and pred_choice == ref_extracted:
-        is_match = True
-    elif pred_choice is None and ref_extracted:
-        # Fallback exact word boundary match
-        pattern = rf"\b{re.escape(ref_extracted)}\b"
-        if re.search(pattern, prediction, re.IGNORECASE):
-            is_match = True
+    is_match = (pred_choice is not None and pred_choice == ref_extracted)
 
     return {
         "quality_score": 1.0 if is_match else 0.0,

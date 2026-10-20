@@ -58,6 +58,7 @@ def run_smoke_test(
     timeout_seconds: float = 120.0,
     think: bool | None = None,
     max_output_tokens: int | None = None,
+    model_ids: list[str] | None = None,
 ) -> tuple[list[ModelOutcome], RunManifest]:
     """
     Execute smoke matrix evaluations.
@@ -71,7 +72,11 @@ def run_smoke_test(
     pricing_map = load_pricing_config(pricing_config_path)
     models = registry.enabled_models()
 
-    if len(models) != 3:
+    if model_ids:
+        models = [m for m in models if m.id in model_ids]
+        if not models:
+            raise ValueError(f"No enabled models matched requested IDs: {model_ids}")
+    elif len(models) != 3:
         raise ValueError(f"Expected exactly 3 enabled candidate models, found {len(models)}")
 
     # 2. Select smoke prompts
@@ -190,11 +195,13 @@ def main() -> None:
     parser.add_argument("--think", action="store_true", default=None, help="Explicitly enable reasoning / thinking mode")
     parser.add_argument("--no-think", action="store_false", dest="think", help="Explicitly disable reasoning / thinking mode")
     parser.add_argument("--max-output-tokens", type=int, default=None, help="Explicit maximum output tokens override")
+    parser.add_argument("--models", type=str, default=None, help="Comma-separated list of candidate model IDs")
     parser.add_argument("--run-id", type=str, default=None, help="Custom run ID")
     parser.add_argument("--output-dir", type=str, default="data/outcomes/smoke", help="Output directory")
     args = parser.parse_args()
 
     split_list = [s.strip() for s in args.splits.split(",")] if args.splits else None
+    model_list = [m.strip() for m in args.models.split(",")] if args.models else None
 
     outcomes, manifest = run_smoke_test(
         output_dir=Path(args.output_dir),
@@ -207,6 +214,7 @@ def main() -> None:
         timeout_seconds=args.timeout,
         think=args.think,
         max_output_tokens=args.max_output_tokens,
+        model_ids=model_list,
     )
 
     print("Smoke test completed.")
