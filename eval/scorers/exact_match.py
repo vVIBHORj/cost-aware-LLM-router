@@ -26,6 +26,14 @@ def extract_boxed_math(text: str) -> str | None:
     return None
 
 
+def extract_final_answer(text: str) -> str | None:
+    """Extract content following 'Final Answer:', 'The answer is:', or 'Correct answer:' if present."""
+    match = re.search(r"(?:final answer|the answer is|correct answer)\s*:\s*([^\n\r]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
 def score_exact_match(
     prediction: str,
     reference: str,
@@ -43,9 +51,9 @@ def score_exact_match(
 
     is_strict = (pred_clean == ref_clean)
 
-    # Check boxed match if reference or prediction has LaTeX boxed
+    # Check boxed match if reference or prediction has LaTeX boxed, or Final Answer: prefix
     ref_boxed = extract_boxed_math(ref_clean) or ref_clean
-    pred_boxed = extract_boxed_math(pred_clean) or pred_clean
+    pred_boxed = extract_boxed_math(pred_clean) or extract_final_answer(pred_clean) or pred_clean
 
     norm_pred = normalize_exact_text(pred_boxed)
     norm_ref = normalize_exact_text(ref_boxed)

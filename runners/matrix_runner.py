@@ -748,6 +748,7 @@ def run_matrix(
     limit: int | None = None,
     retry_failed: bool = False,
     providers_override: dict[str, InferenceProvider] | None = None,
+    prompts_file: Path | str | None = None,
 ) -> tuple[list[ModelOutcome], list[ScoreOutcome], RunManifest]:
     """
     Execute durable, crash-safe, resumable matrix evaluation across candidate models and benchmark split.
@@ -764,8 +765,11 @@ def run_matrix(
 
     check_smoke_artifact_collision(output_dir=output_dir, force=force)
 
-    # 1. Load benchmark split
-    split_file = processed_dir / f"benchmark_{split}.jsonl"
+    # 1. Load benchmark split or custom prompts file
+    if prompts_file:
+        split_file = Path(prompts_file)
+    else:
+        split_file = processed_dir / f"benchmark_{split}.jsonl"
     if not split_file.exists():
         raise FileNotFoundError(f"Benchmark split file not found: {split_file}")
     prompts = load_benchmark_jsonl(split_file)
@@ -988,7 +992,7 @@ def run_matrix(
             m_pricing = pricing_map.get(model.id)
             if use_mock:
                 providers[model.id] = MockInferenceProvider(model_config=model, pricing=m_pricing)
-            elif (backend or model.backend).lower() == "ollama":
+            elif effective_backend.lower() == "ollama":
                 providers[model.id] = OllamaProvider(model_config=model, pricing=m_pricing)
             else:
                 providers[model.id] = VLLMProvider(model_config=model, pricing=m_pricing)
@@ -1152,6 +1156,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Force execution even if existing manifest settings conflict")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of planned attempts (for testing/partial runs)")
     parser.add_argument("--retry-failed", action="store_true", help="Retry existing attempts with FAILED/TIMEOUT/BACKEND_UNAVAILABLE status")
+    parser.add_argument("--prompts-file", type=str, default=None, help="Custom benchmark prompts JSONL file override")
 
     args = parser.parse_args()
 
@@ -1178,6 +1183,7 @@ def main() -> None:
             force=args.force,
             limit=args.limit,
             retry_failed=args.retry_failed,
+            prompts_file=Path(args.prompts_file) if args.prompts_file else None,
         )
     except ConfigurationMismatchError as exc:
         print(f"\n[CONFIGURATION ERROR] {exc}", file=sys.stderr)

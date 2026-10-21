@@ -61,6 +61,10 @@ def test_exact_match_strict_and_normalized():
     res3 = score_exact_match(r"The result is \boxed{3/4}", "3/4")
     assert res3["quality_score"] == 1.0
 
+    # Final Answer prefix extraction
+    res_fa = score_exact_match("We calculate the sum to be 42.\n\nFinal Answer: 42", "42")
+    assert res_fa["quality_score"] == 1.0
+
     # Numeric equivalence
     res4 = score_exact_match("12.0", "12")
     assert res4["quality_score"] == 1.0

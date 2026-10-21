@@ -904,3 +904,29 @@ def test_dry_run_displays_detailed_policy_and_budget(synthetic_env, capsys):
     assert "Experiment Fingerprint:" in captured
     assert "Dry run complete. No inference executed." in captured
 
+
+def test_custom_prompts_file_execution(synthetic_env):
+    """Test that matrix runner can load prompts directly from an explicit prompts_file."""
+    processed_dir, output_dir = synthetic_env
+    registry = load_model_registry("configs/models.yaml")
+    model = registry.enabled_models()[0]
+    provider = SpyMockProvider(model_config=model)
+
+    custom_file = processed_dir / "custom_subset.jsonl"
+    # Write only 1 prompt to custom subset
+    prompt_line = (processed_dir / "benchmark_train.jsonl").read_text(encoding="utf-8").strip().splitlines()[0]
+    custom_file.write_text(prompt_line + "\n", encoding="utf-8")
+
+    outcomes, scores, manifest = run_matrix(
+        output_dir=output_dir,
+        model_ids=[model.id],
+        prompts_file=custom_file,
+        providers_override={model.id: provider},
+    )
+
+    assert len(outcomes) == 1
+    assert manifest.expected_outcome_rows == 1
+    assert manifest.actual_outcome_rows == 1
+    assert provider.call_history == [("synth-001", model.id)]
+
+
