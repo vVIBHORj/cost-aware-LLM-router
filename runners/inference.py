@@ -9,11 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from router.benchmark_schema import BenchmarkPrompt
 from router.config import ModelConfig
 from runners.inference_policy import (
+    PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_V0,
+    dispatch_task_policy,
     format_prompt_with_policy,
     resolve_output_budget,
     resolve_response_format,
     resolve_thinking_mode,
+    validate_structured_output_json,
 )
 from runners.outcome_schema import ExecutionStatus, ModelOutcome
 
@@ -120,26 +123,20 @@ class InferenceProvider(ABC):
         and explicit cost accounting. Returns a validated ModelOutcome.
         """
         request_timestamp = datetime.now(timezone.utc).isoformat()
-        effective_max_tokens = max_output_tokens or resolve_output_budget(
-            task_type=prompt.task_type,
-            evaluation_type=prompt.evaluation_type,
-        )
-        effective_think = resolve_thinking_mode(
-            task_type=prompt.task_type,
-            evaluation_type=prompt.evaluation_type,
-            user_override=think,
-        )
-        effective_prompt = format_prompt_with_policy(
+        dispatched = dispatch_task_policy(
             prompt_text=prompt.prompt,
-            evaluation_type=prompt.evaluation_type,
             task_type=prompt.task_type,
-            policy_version=prompt_policy_version,
-        )
-        effective_format = response_format or resolve_response_format(
-            policy_version=prompt_policy_version,
             evaluation_type=prompt.evaluation_type,
-            task_type=prompt.task_type,
+            requested_policy=prompt_policy_version,
+            user_output_budget=max_output_tokens,
+            user_think=think,
+            response_format=response_format,
         )
+        effective_max_tokens = dispatched.output_budget
+        effective_think = dispatched.thinking_mode
+        effective_prompt = dispatched.effective_prompt
+        effective_format = dispatched.response_schema
+        effective_policy_version = dispatched.policy_version
 
         # Check backend availability first
         if not self.is_available():
@@ -186,7 +183,7 @@ class InferenceProvider(ABC):
                 backend=backend_str,
                 model_name=model_target,
                 inference_engine_version=None,
-                prompt_policy_version=prompt_policy_version,
+                prompt_policy_version=effective_policy_version,
             )
             return outcome
 
@@ -197,7 +194,7 @@ class InferenceProvider(ABC):
             seed=seed,
             timeout_seconds=timeout_seconds,
             think=effective_think,
-            prompt_policy_version=prompt_policy_version,
+            prompt_policy_version=effective_policy_version,
             response_format=effective_format,
         )
 
@@ -222,6 +219,16 @@ class InferenceProvider(ABC):
                 attempt_status: ExecutionStatus = "SUCCESS"
                 if result.finish_reason == "length" or result.is_truncated:
                     attempt_status = "TRUNCATED"
+                    final_error_type = "TokenLimitExceeded"
+                    final_error_msg = f"Generation reached max_output_tokens limit ({effective_max_tokens})."
+                elif effective_format is not None and isinstance(effective_format, dict):
+                    is_valid, parsed_data, schema_err = validate_structured_output_json(
+                        result.generated_text, schema=effective_format
+                    )
+                    if not is_valid:
+                        attempt_status = "INVALID_OUTPUT"
+                        final_error_type = "SchemaValidationError"
+                        final_error_msg = f"Generated text violates response schema: {schema_err}"
 
                 attempts.append({
                     "attempt": attempt_idx + 1,
@@ -234,9 +241,6 @@ class InferenceProvider(ABC):
                 })
                 final_result = result
                 final_status = attempt_status
-                if attempt_status == "TRUNCATED":
-                    final_error_type = "TokenLimitExceeded"
-                    final_error_msg = f"Generation reached max_output_tokens limit ({effective_max_tokens})."
                 break
 
             except TimeoutError as e:
@@ -312,7 +316,7 @@ class InferenceProvider(ABC):
             backend=getattr(self, "backend_name", self.model_config.backend),
             model_name=getattr(self, "model_tag", self.model_config.model_name),
             inference_engine_version=final_result.engine_version if final_result else None,
-            prompt_policy_version=prompt_policy_version,
+            prompt_policy_version=effective_policy_version,
         )
 
         outcome.calculate_cost(

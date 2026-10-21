@@ -30,11 +30,13 @@ from runners.inference import InferenceProvider, load_pricing_config
 from runners.inference_policy import (
     DEFAULT_TASK_OUTPUT_BUDGETS,
     DEFAULT_THINKING_POLICY,
+    PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_V0,
     PROMPT_POLICY_V1_CONCISE,
     PROMPT_POLICY_V2_ANSWER_ONLY,
     PROMPT_POLICY_V3_FEW_SHOT,
     PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
+    SUPPORTED_PROMPT_POLICIES,
     resolve_response_format,
 )
 from runners.ollama_runner import OllamaProvider
@@ -48,14 +50,6 @@ from runners.storage import (
 from runners.vllm_runner import MockInferenceProvider, VLLMProvider
 
 logger = logging.getLogger(__name__)
-
-SUPPORTED_PROMPT_POLICIES = {
-    PROMPT_POLICY_V0,
-    PROMPT_POLICY_V1_CONCISE,
-    PROMPT_POLICY_V2_ANSWER_ONLY,
-    PROMPT_POLICY_V3_FEW_SHOT,
-    PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -604,11 +598,14 @@ def build_run_manifest(
     token_accounting_avail = any(o.prompt_tokens is not None for o in outcomes)
     latency_avail = any(o.latency_ms > 0.0 for o in outcomes)
 
-    schema_used = resolve_response_format(policy_version=prompt_policy_version)
-    if isinstance(schema_used, str):
-        schema_dict = {"format": schema_used}
+    if prompt_policy_version == PROMPT_POLICY_TASK_AWARE:
+        schema_dict = {"mode": "task_aware_dispatch"}
     else:
-        schema_dict = schema_used
+        schema_used = resolve_response_format(policy_version=prompt_policy_version)
+        if isinstance(schema_used, str):
+            schema_dict = {"format": schema_used}
+        else:
+            schema_dict = schema_used
 
     effective_settings: dict[str, Any] = {
         "temperature": temperature,
@@ -798,8 +795,11 @@ def run_matrix(
     models_checksum = compute_file_sha256(models_config_path)
 
     effective_backend = "mock" if use_mock else (backend or "ollama")
-    schema_used = resolve_response_format(policy_version=prompt_policy_version)
-    schema_dict = {"format": schema_used} if isinstance(schema_used, str) else schema_used
+    if prompt_policy_version == PROMPT_POLICY_TASK_AWARE:
+        schema_dict = {"mode": "task_aware_dispatch"}
+    else:
+        schema_used = resolve_response_format(policy_version=prompt_policy_version)
+        schema_dict = {"format": schema_used} if isinstance(schema_used, str) else schema_used
     model_tags = {m.id: m.model_name for m in models}
 
     experiment_fingerprint, experiment_config = compute_experiment_fingerprint(
@@ -906,6 +906,7 @@ def run_matrix(
             PROMPT_POLICY_V2_ANSWER_ONLY: "Strict answer-only prompt (negative constraint: no reasoning/explanation)",
             PROMPT_POLICY_V3_FEW_SHOT: "1-shot synthetic demonstration prompt",
             PROMPT_POLICY_V4_STRUCTURED_OUTPUT: "Native Ollama structured JSON schema enum constraint",
+            PROMPT_POLICY_TASK_AWARE: "Task-aware adaptive dispatch across all 8 benchmark categories",
         }
         policy_desc = policy_descriptions.get(prompt_policy_version, "Custom prompt policy")
         budget_desc = f"{max_output_tokens} tokens (explicit override)" if max_output_tokens else f"dynamic per task (multiple_choice: {DEFAULT_TASK_OUTPUT_BUDGETS['multiple_choice']}, exact_match: {DEFAULT_TASK_OUTPUT_BUDGETS['exact_match']}, classification: {DEFAULT_TASK_OUTPUT_BUDGETS['classification']})"

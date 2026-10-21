@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 # Default output-token budgets per evaluation type and task category.
@@ -78,6 +79,47 @@ PROMPT_POLICY_V1_CONCISE = "v1_concise"
 PROMPT_POLICY_V2_ANSWER_ONLY = "v2_answer_only"
 PROMPT_POLICY_V3_FEW_SHOT = "v3_few_shot"
 PROMPT_POLICY_V4_STRUCTURED_OUTPUT = "v4_structured_output"
+PROMPT_POLICY_TASK_AWARE = "task_aware"
+
+SUPPORTED_PROMPT_POLICIES = {
+    PROMPT_POLICY_V0,
+    PROMPT_POLICY_V1_CONCISE,
+    PROMPT_POLICY_V2_ANSWER_ONLY,
+    PROMPT_POLICY_V3_FEW_SHOT,
+    PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
+    PROMPT_POLICY_TASK_AWARE,
+}
+
+COMPATIBLE_SCORERS: dict[str, tuple[str, str]] = {
+    "multiple_choice": ("multiple_choice_scorer", "1.0.0"),
+    "exact_match": ("exact_match_scorer", "1.0.0"),
+    "classification": ("exact_match_scorer", "1.0.0"),
+    "code_execution": ("code_execution_scorer", "1.0.0"),
+    "reference_based": ("reference_based_scorer", "1.0.0"),
+    "ifeval": ("ifeval_scorer", "1.0.0"),
+    "llm_judge": ("llm_judge_interface", "1.0.0"),
+}
+
+
+class UnsupportedTaskPolicyError(ValueError):
+    """Raised when an unsupported prompt policy or schema is requested for a task."""
+    pass
+
+
+@dataclass(frozen=True)
+class DispatchedTaskPolicy:
+    """Explicit resolved policy specification for a single prompt evaluation."""
+    task_type: str
+    evaluation_type: str
+    policy_version: str
+    effective_prompt: str
+    output_budget: int
+    thinking_mode: bool
+    response_schema: dict[str, Any] | None
+    compatible_scorer: str
+    scorer_version: str
+    description: str
+
 
 MULTIPLE_CHOICE_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -125,6 +167,12 @@ DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
         "classification": (
             "Classify the text. Keep the output concise and state only the final label as `Final Answer: <label>`."
         ),
+        "summarization": (
+            "Summarize the article concisely in 2-3 sentences. Do not include introductory preamble or conversational commentary."
+        ),
+        "coding": (
+            "Write python code to solve the task. Output the code cleanly inside a markdown code block ```python ... ``` without conversational commentary."
+        ),
     },
     PROMPT_POLICY_V2_ANSWER_ONLY: {
         "multiple_choice": (
@@ -134,7 +182,7 @@ DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
             "Output only the final answer, with no explanation, reasoning, units, prefix, or other text."
         ),
         "classification": (
-            "Output only the final label, with no explanation, reasoning, prefix, or other text."
+            "Answer true or false based on the text. Output only the final label ('true' or 'false'), with no explanation, reasoning, prefix, or other text."
         ),
     },
     PROMPT_POLICY_V3_FEW_SHOT: {
@@ -263,8 +311,150 @@ def format_prompt_with_policy(
         return f"{demo}\n\nQuestion:\n{prompt_text}\n\nInstruction: {instruction}"
 
     policy_map = DEFAULT_PROMPT_POLICY_INSTRUCTIONS.get(policy_version, {})
-    instruction = policy_map.get(evaluation_type) or policy_map.get(task_type)
+    instruction = policy_map.get(task_type) or policy_map.get(evaluation_type)
     if not instruction:
         return prompt_text
 
     return f"{prompt_text}\n\nInstruction: {instruction}"
+
+
+def dispatch_task_policy(
+    prompt_text: str,
+    task_type: str,
+    evaluation_type: str,
+    requested_policy: str = PROMPT_POLICY_TASK_AWARE,
+    user_output_budget: int | None = None,
+    user_think: bool | None = None,
+    response_format: dict[str, Any] | str | None = None,
+) -> DispatchedTaskPolicy:
+    """
+    Select explicit inference settings based on task type and evaluation type.
+    Guarantees:
+    - Multiple-choice JSON schema is only applied to genuine multiple-choice tasks.
+    - Generative tasks (coding, summarization, ifeval) are never forced into MC schema or answer-only mode.
+    - Unsupported task-policy combinations raise UnsupportedTaskPolicyError before inference.
+    - Task-specific budgets prevent runaway generation while ensuring complete answers.
+    - Preserves original benchmark prompt and source data.
+    """
+    if requested_policy not in SUPPORTED_PROMPT_POLICIES:
+        raise UnsupportedTaskPolicyError(
+            f"Unknown prompt policy '{requested_policy}'. Supported: {sorted(SUPPORTED_PROMPT_POLICIES)}"
+        )
+
+    if evaluation_type not in COMPATIBLE_SCORERS:
+        raise UnsupportedTaskPolicyError(
+            f"Unsupported evaluation_type '{evaluation_type}' for task '{task_type}'."
+        )
+
+    scorer_name, scorer_version = COMPATIBLE_SCORERS[evaluation_type]
+
+    # Guard: v4_structured_output is only supported for multiple_choice, exact_match, and classification
+    if requested_policy == PROMPT_POLICY_V4_STRUCTURED_OUTPUT:
+        if evaluation_type not in ("multiple_choice", "exact_match", "classification"):
+            raise UnsupportedTaskPolicyError(
+                f"Policy '{PROMPT_POLICY_V4_STRUCTURED_OUTPUT}' is not supported for generative task '{task_type}' "
+                f"(evaluation_type: '{evaluation_type}'). Structured output schema is not supported for coding, summarization, or IFEval."
+            )
+
+    # Guard: v2_answer_only cannot be applied to generative tasks
+    if requested_policy == PROMPT_POLICY_V2_ANSWER_ONLY:
+        if evaluation_type in ("code_execution", "reference_based", "ifeval"):
+            raise UnsupportedTaskPolicyError(
+                f"Policy '{PROMPT_POLICY_V2_ANSWER_ONLY}' is not supported for generative task '{task_type}' "
+                f"(evaluation_type: '{evaluation_type}')."
+            )
+
+    # Guard: v3_few_shot cannot be applied to tasks without defined demonstrations
+    if requested_policy == PROMPT_POLICY_V3_FEW_SHOT:
+        if evaluation_type in ("code_execution", "reference_based", "ifeval"):
+            raise UnsupportedTaskPolicyError(
+                f"Policy '{PROMPT_POLICY_V3_FEW_SHOT}' has no valid demonstration for '{task_type}' "
+                f"(evaluation_type: '{evaluation_type}')."
+            )
+
+    # Resolve settings under task-aware dispatcher
+    if requested_policy == PROMPT_POLICY_TASK_AWARE:
+        if evaluation_type == "multiple_choice":
+            resolved_policy = PROMPT_POLICY_V4_STRUCTURED_OUTPUT
+            budget = user_output_budget or 64
+            thinking = user_think if user_think is not None else False
+            schema = MULTIPLE_CHOICE_JSON_SCHEMA
+            description = "Task-aware structured JSON output policy (schema-constrained A/B/C/D)."
+
+        elif task_type == "classification":
+            resolved_policy = PROMPT_POLICY_V2_ANSWER_ONLY
+            budget = user_output_budget or 64
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware concise answer-only label policy for classification."
+
+        elif task_type == "math" and evaluation_type == "exact_match":
+            resolved_policy = PROMPT_POLICY_V1_CONCISE
+            budget = user_output_budget or 512
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware concise derivation with Final Answer marker for math."
+
+        elif task_type == "reasoning" and evaluation_type == "exact_match":
+            resolved_policy = PROMPT_POLICY_V1_CONCISE
+            budget = user_output_budget or 256
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware concise derivation with Final Answer marker for boolean/reasoning."
+
+        elif task_type == "instruction_following" and evaluation_type == "ifeval":
+            resolved_policy = PROMPT_POLICY_V0
+            budget = user_output_budget or 1024
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware verbatim prompt policy for instruction-following constraints."
+
+        elif task_type == "summarization" and evaluation_type == "reference_based":
+            resolved_policy = PROMPT_POLICY_V1_CONCISE
+            budget = user_output_budget or 256
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware bounded 2-3 sentence summarization policy."
+
+        elif task_type == "coding" and evaluation_type == "code_execution":
+            resolved_policy = PROMPT_POLICY_V1_CONCISE
+            budget = user_output_budget or 512
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware code block implementation policy."
+
+        else:
+            resolved_policy = PROMPT_POLICY_V1_CONCISE
+            budget = user_output_budget or resolve_output_budget(task_type, evaluation_type)
+            thinking = user_think if user_think is not None else False
+            schema = None
+            description = "Task-aware default concise policy."
+
+    else:
+        # User specified an explicit policy override (v0, v1_concise, v2_answer_only, v3_few_shot, v4_structured_output)
+        resolved_policy = requested_policy
+        budget = user_output_budget or resolve_output_budget(task_type, evaluation_type)
+        thinking = user_think if user_think is not None else resolve_thinking_mode(task_type, evaluation_type)
+        schema = response_format or resolve_response_format(requested_policy, evaluation_type, task_type)
+        description = f"Explicit user policy override '{requested_policy}'."
+
+    effective_prompt = format_prompt_with_policy(
+        prompt_text=prompt_text,
+        evaluation_type=evaluation_type,
+        task_type=task_type,
+        policy_version=resolved_policy,
+    )
+
+    return DispatchedTaskPolicy(
+        task_type=task_type,
+        evaluation_type=evaluation_type,
+        policy_version=resolved_policy,
+        effective_prompt=effective_prompt,
+        output_budget=budget,
+        thinking_mode=thinking,
+        response_schema=schema,
+        compatible_scorer=scorer_name,
+        scorer_version=scorer_version,
+        description=description,
+    )
+
