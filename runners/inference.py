@@ -12,6 +12,7 @@ from runners.inference_policy import (
     PROMPT_POLICY_V0,
     format_prompt_with_policy,
     resolve_output_budget,
+    resolve_response_format,
     resolve_thinking_mode,
 )
 from runners.outcome_schema import ExecutionStatus, ModelOutcome
@@ -51,6 +52,7 @@ class GenerationRequest(BaseModel):
     stop: list[str] | None = None
     think: bool | None = None
     prompt_policy_version: str | None = None
+    response_format: dict[str, Any] | str | None = None
 
 
 class GenerationResult(BaseModel):
@@ -111,6 +113,7 @@ class InferenceProvider(ABC):
         max_output_tokens: int | None = None,
         think: bool | None = None,
         prompt_policy_version: str = PROMPT_POLICY_V0,
+        response_format: dict[str, Any] | str | None = None,
     ) -> ModelOutcome:
         """
         Execute one benchmark prompt with bounded retries, telemetry tracking,
@@ -131,6 +134,11 @@ class InferenceProvider(ABC):
             evaluation_type=prompt.evaluation_type,
             task_type=prompt.task_type,
             policy_version=prompt_policy_version,
+        )
+        effective_format = response_format or resolve_response_format(
+            policy_version=prompt_policy_version,
+            evaluation_type=prompt.evaluation_type,
+            task_type=prompt.task_type,
         )
 
         # Check backend availability first
@@ -190,6 +198,7 @@ class InferenceProvider(ABC):
             timeout_seconds=timeout_seconds,
             think=effective_think,
             prompt_policy_version=prompt_policy_version,
+            response_format=effective_format,
         )
 
         attempts: list[dict[str, Any]] = []

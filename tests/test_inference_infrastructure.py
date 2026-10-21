@@ -392,6 +392,7 @@ def test_prompt_policy_formatting_and_propagation(sample_prompt, candidate_model
         PROMPT_POLICY_V0,
         PROMPT_POLICY_V1_CONCISE,
         PROMPT_POLICY_V2_ANSWER_ONLY,
+        PROMPT_POLICY_V3_FEW_SHOT,
         format_prompt_with_policy,
     )
 
@@ -411,14 +412,90 @@ def test_prompt_policy_formatting_and_propagation(sample_prompt, candidate_model
     assert "Output only its option letter" in v2_text
     assert "Instruction:" in v2_text
 
+    # v3_few_shot prepends synthetic demonstration and appends final answer instruction
+    v3_text = format_prompt_with_policy(sample_prompt.prompt, "multiple_choice", "qa", PROMPT_POLICY_V3_FEW_SHOT)
+    assert "Which of these is a fruit?" in v3_text
+    assert "Correct answer: B" in v3_text
+    assert sample_prompt.prompt in v3_text
+    assert "Instruction:" in v3_text
+
+    # v4_structured_output formatting
+    from runners.inference_policy import (
+        PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
+        MULTIPLE_CHOICE_JSON_SCHEMA,
+        resolve_response_format,
+        validate_structured_output_json,
+    )
+    v4_text = format_prompt_with_policy(sample_prompt.prompt, "multiple_choice", "qa", PROMPT_POLICY_V4_STRUCTURED_OUTPUT)
+    assert sample_prompt.prompt in v4_text
+    assert "JSON object" in v4_text
+    assert "Instruction:" in v4_text
+
     # Verify execution records prompt_policy_version
     provider = MockInferenceProvider(candidate_model)
     outcome = provider.execute_prompt(
         sample_prompt,
         run_id="policy-run-1",
-        prompt_policy_version=PROMPT_POLICY_V2_ANSWER_ONLY,
+        prompt_policy_version=PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
     )
-    assert outcome.prompt_policy_version == PROMPT_POLICY_V2_ANSWER_ONLY
+    assert outcome.prompt_policy_version == PROMPT_POLICY_V4_STRUCTURED_OUTPUT
+
+
+def test_structured_output_schema_validation():
+    from runners.inference_policy import (
+        MULTIPLE_CHOICE_JSON_SCHEMA,
+        validate_structured_output_json,
+        resolve_response_format,
+        PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
+    )
+
+    # 1. Resolve response format
+    fmt = resolve_response_format(PROMPT_POLICY_V4_STRUCTURED_OUTPUT, "multiple_choice")
+    assert fmt == MULTIPLE_CHOICE_JSON_SCHEMA
+
+    # 2. Valid JSON conforming to schema
+    valid, data, err = validate_structured_output_json('{"answer": "B"}', MULTIPLE_CHOICE_JSON_SCHEMA)
+    assert valid is True
+    assert data == {"answer": "B"}
+    assert err is None
+
+    # 3. Valid JSON with enum violation
+    valid, data, err = validate_structured_output_json('{"answer": "Z"}', MULTIPLE_CHOICE_JSON_SCHEMA)
+    assert valid is False
+    assert "not in allowed enum" in err
+
+    # 4. Valid JSON missing required property
+    valid, data, err = validate_structured_output_json('{"choice": "A"}', MULTIPLE_CHOICE_JSON_SCHEMA)
+    assert valid is False
+    assert "Missing required property: 'answer'" in err
+
+    # 5. Valid JSON with disallowed additionalProperties
+    valid, data, err = validate_structured_output_json('{"answer": "A", "extra": 1}', MULTIPLE_CHOICE_JSON_SCHEMA)
+    assert valid is False
+    assert "Unexpected additional properties" in err
+
+    # 6. Malformed JSON handling
+    valid, data, err = validate_structured_output_json('{"answer": "A"', MULTIPLE_CHOICE_JSON_SCHEMA)
+    assert valid is False
+    assert "JSONDecodeError" in err
+
+    # 7. Empty output
+    valid, data, err = validate_structured_output_json('', MULTIPLE_CHOICE_JSON_SCHEMA)
+    assert valid is False
+    assert "empty" in err.lower()
+
+
+def test_structured_output_answer_extraction():
+    from eval.scorers.multiple_choice import extract_mc_choice
+
+    assert extract_mc_choice('{"answer": "B"}') == "B"
+    assert extract_mc_choice('{\n  "answer": "A"\n}') == "A"
+    assert extract_mc_choice('```json\n{"answer": "C"}\n```') == "C"
+    assert extract_mc_choice('{"answer": "b"}') == "B"
+    assert extract_mc_choice('{"answer": "D"') == "D"
+    assert extract_mc_choice('{"answer": "invalid"}') is None
+
+
 
 
 

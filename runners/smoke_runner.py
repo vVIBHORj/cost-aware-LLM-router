@@ -13,6 +13,7 @@ from runners.ollama_runner import OllamaProvider
 from runners.outcome_schema import ModelOutcome, RunManifest
 from runners.storage import save_outcomes_parquet, save_run_manifest
 from runners.vllm_runner import MockInferenceProvider, VLLMProvider
+from runners.inference_policy import resolve_response_format
 from eval.scorer import OutcomeScorer
 from eval.storage import save_scores_parquet
 
@@ -145,6 +146,12 @@ def run_smoke_test(
     token_accounting_avail = any(o.prompt_tokens is not None for o in outcomes)
     latency_avail = any(o.latency_ms > 0.0 for o in outcomes)
 
+    schema_used = resolve_response_format(policy_version=prompt_policy_version)
+    if isinstance(schema_used, str):
+        schema_dict = {"format": schema_used}
+    else:
+        schema_dict = schema_used
+
     manifest = RunManifest(
         run_id=run_id,
         benchmark_manifest_checksum=bench_checksum,
@@ -163,6 +170,16 @@ def run_smoke_test(
         token_accounting_available=token_accounting_avail,
         latency_available=latency_avail,
         prompt_policy_version=prompt_policy_version,
+        response_schema=schema_dict,
+        output_budget=max_output_tokens,
+        effective_inference_settings={
+            "temperature": 0.0,
+            "seed": 42,
+            "timeout_seconds": timeout_seconds,
+            "think": think,
+            "max_output_tokens": max_output_tokens,
+            "backend": backend or "ollama",
+        },
     )
 
     # 6. Save outcomes and manifest

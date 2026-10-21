@@ -14,6 +14,28 @@ def extract_mc_choice(text: str) -> str | None:
 
     cleaned = text.strip()
 
+    # Pattern 0: Structured JSON output, e.g. {"answer": "B"} or Markdown ```json block
+    json_candidate = cleaned
+    if "```json" in json_candidate:
+        m_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", json_candidate, re.DOTALL)
+        if m_block:
+            json_candidate = m_block.group(1).strip()
+    if json_candidate.startswith("{") and json_candidate.endswith("}"):
+        try:
+            import json as _json
+            data = _json.loads(json_candidate)
+            if isinstance(data, dict) and "answer" in data:
+                val = str(data["answer"]).strip().upper()
+                if re.match(r"^[A-H]$", val):
+                    return val
+        except Exception:
+            pass
+
+    # JSON regex fallback for partial / unclosed JSON: "answer"\s*:\s*"([A-Ha-h])"
+    p_json_field = re.findall(r'"answer"\s*:\s*"([A-Ha-h])"', cleaned, re.IGNORECASE)
+    if p_json_field:
+        return p_json_field[-1].upper()
+
     # Pattern 1: Explicit Final Answer statement (take the last occurrence in generation)
     # e.g. 'Final Answer: B', 'Final Answer: **A**', 'Final Answer: `C`', '### Final Answer:\n**C. 12**', 'Final Answer: Option D'
     p_final = re.findall(
@@ -48,7 +70,7 @@ def extract_mc_choice(text: str) -> str | None:
         return p_option_correct[-1].upper()
 
     p_line_answer = re.findall(
-        r"(?mi)^(?:[#\*\s]*)(?:answer|option|choice)\s*:\s*[\*`\s]*\(?([A-Ha-h])\)?",
+        r"(?mi)^(?:[#\*\s]*)(?:correct\s+answer|final\s+answer|answer|option|choice)\s*:\s*[\*`\s]*(?:option\s+|choice\s+)?\(?([A-Ha-h])\)?",
         cleaned,
     )
     if p_line_answer:

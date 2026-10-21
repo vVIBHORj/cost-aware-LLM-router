@@ -76,6 +76,40 @@ def resolve_thinking_mode(
 PROMPT_POLICY_V0 = "v0"
 PROMPT_POLICY_V1_CONCISE = "v1_concise"
 PROMPT_POLICY_V2_ANSWER_ONLY = "v2_answer_only"
+PROMPT_POLICY_V3_FEW_SHOT = "v3_few_shot"
+PROMPT_POLICY_V4_STRUCTURED_OUTPUT = "v4_structured_output"
+
+MULTIPLE_CHOICE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "enum": ["A", "B", "C", "D"],
+        }
+    },
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+STRUCTURED_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "multiple_choice": MULTIPLE_CHOICE_JSON_SCHEMA,
+    "exact_match": {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"}
+        },
+        "required": ["answer"],
+        "additionalProperties": False,
+    },
+    "classification": {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string"}
+        },
+        "required": ["label"],
+        "additionalProperties": False,
+    },
+}
 
 DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
     PROMPT_POLICY_V0: {},
@@ -103,7 +137,108 @@ DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
             "Output only the final label, with no explanation, reasoning, prefix, or other text."
         ),
     },
+    PROMPT_POLICY_V3_FEW_SHOT: {
+        "multiple_choice": (
+            "Select the single best answer. Output one option letter as the final answer."
+        ),
+        "exact_match": (
+            "Output only the final answer."
+        ),
+        "classification": (
+            "Output only the final label."
+        ),
+    },
+    PROMPT_POLICY_V4_STRUCTURED_OUTPUT: {
+        "multiple_choice": (
+            "Select the single best answer. Return a JSON object with key 'answer' whose value is the chosen option letter (A, B, C, or D)."
+        ),
+        "exact_match": (
+            "Solve the question. Return a JSON object with key 'answer' containing the final answer."
+        ),
+        "classification": (
+            "Classify the text. Return a JSON object with key 'label' containing the classification label."
+        ),
+    },
 }
+
+FEW_SHOT_DEMONSTRATIONS: dict[str, str] = {
+    "multiple_choice": (
+        "Question: Which of these is a fruit?\n"
+        "A. Carrot\n"
+        "B. Apple\n"
+        "C. Potato\n"
+        "D. Onion\n\n"
+        "Correct answer: B"
+    ),
+    "exact_match": (
+        "Question: What is 2 + 2?\n\n"
+        "Correct answer: 4"
+    ),
+    "classification": (
+        "Text: I loved this film, it was wonderful!\n\n"
+        "Correct label: positive"
+    ),
+}
+
+
+def resolve_response_format(
+    policy_version: str | None = None,
+    evaluation_type: str | None = None,
+    task_type: str | None = None,
+) -> dict[str, Any] | str | None:
+    """
+    Resolve the structured output schema for a given prompt policy version and evaluation type.
+    Returns JSON schema dict for v4_structured_output, or None for unconstrained policies.
+    """
+    if policy_version == PROMPT_POLICY_V4_STRUCTURED_OUTPUT:
+        key = evaluation_type or task_type or "multiple_choice"
+        return STRUCTURED_OUTPUT_SCHEMAS.get(key, MULTIPLE_CHOICE_JSON_SCHEMA)
+    return None
+
+
+def validate_structured_output_json(
+    text: str,
+    schema: dict[str, Any] | None = None,
+) -> tuple[bool, Any, str | None]:
+    """
+    Validate that text parses as valid JSON and conforms to the expected schema.
+    Returns (is_valid, parsed_data_or_none, error_message_or_none).
+    """
+    import json
+    if not text or not text.strip():
+        return False, None, "Output is empty"
+
+    cleaned = text.strip()
+    if "```json" in cleaned:
+        import re
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+        if m:
+            cleaned = m.group(1).strip()
+
+    try:
+        data = json.loads(cleaned)
+    except Exception as e:
+        return False, None, f"JSONDecodeError: {e}"
+
+    if schema is not None:
+        if schema.get("type") == "object":
+            if not isinstance(data, dict):
+                return False, data, f"Expected JSON object dict, got {type(data).__name__}"
+            for req in schema.get("required", []):
+                if req not in data:
+                    return False, data, f"Missing required property: '{req}'"
+            properties = schema.get("properties", {})
+            for key, val in data.items():
+                prop_spec = properties.get(key)
+                if prop_spec and "enum" in prop_spec:
+                    if val not in prop_spec["enum"]:
+                        return False, data, f"Property '{key}' value '{val}' not in allowed enum {prop_spec['enum']}"
+            if schema.get("additionalProperties") is False:
+                extra = set(data.keys()) - set(properties.keys())
+                if extra:
+                    return False, data, f"Unexpected additional properties: {extra}"
+
+    return True, data, None
 
 
 def format_prompt_with_policy(
@@ -118,6 +253,14 @@ def format_prompt_with_policy(
     """
     if policy_version == PROMPT_POLICY_V0 or not policy_version:
         return prompt_text
+
+    if policy_version == PROMPT_POLICY_V3_FEW_SHOT:
+        key = evaluation_type or task_type or "multiple_choice"
+        demo = FEW_SHOT_DEMONSTRATIONS.get(key, FEW_SHOT_DEMONSTRATIONS["multiple_choice"])
+        instruction = DEFAULT_PROMPT_POLICY_INSTRUCTIONS[PROMPT_POLICY_V3_FEW_SHOT].get(
+            key, "Select the single best answer. Output one option letter as the final answer."
+        )
+        return f"{demo}\n\nQuestion:\n{prompt_text}\n\nInstruction: {instruction}"
 
     policy_map = DEFAULT_PROMPT_POLICY_INSTRUCTIONS.get(policy_version, {})
     instruction = policy_map.get(evaluation_type) or policy_map.get(task_type)

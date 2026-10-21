@@ -168,3 +168,6 @@ class RunManifest(BaseModel):
     token_accounting_available: bool
     latency_available: bool
     prompt_policy_version: str | None = None
+    response_schema: dict[str, Any] | None = None
+    output_budget: int | None = None
+    effective_inference_settings: dict[str, Any] | None = None

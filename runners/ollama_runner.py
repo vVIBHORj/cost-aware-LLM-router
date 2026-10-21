@@ -221,6 +221,8 @@ class OllamaProvider(InferenceProvider):
                 "messages": [{"role": "user", "content": request.prompt}],
                 "stream": False,
             }
+            if request.response_format is not None:
+                payload["format"] = request.response_format
             if request.think is not None:
                 payload["think"] = request.think
             options: dict[str, Any] = {
@@ -242,6 +244,14 @@ class OllamaProvider(InferenceProvider):
                 "seed": request.seed,
                 "stream": False,
             }
+            if request.response_format is not None:
+                if isinstance(request.response_format, dict):
+                    payload["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {"name": "response", "schema": request.response_format},
+                    }
+                else:
+                    payload["response_format"] = {"type": request.response_format}
             if request.think is not None:
                 payload["think"] = request.think
             if request.stop:
