@@ -1,8 +1,8 @@
 """
 Matrix Runner for Cost-Aware LLM Router.
 Provides durable, crash-safe, resumable execution of benchmark matrix evaluations.
-Guarantees incremental persistence, deterministic deduplication, failure preservation,
-and safe recovery across candidate model evaluations.
+Guarantees incremental persistence, deterministic deduplication with attempt-history preservation,
+experiment configuration fingerprinting, failure preservation, and safe recovery.
 """
 
 from __future__ import annotations
@@ -27,7 +27,16 @@ from router.benchmark_loader import load_benchmark_jsonl
 from router.benchmark_schema import BenchmarkPrompt
 from router.config import ModelConfig, load_model_registry
 from runners.inference import InferenceProvider, load_pricing_config
-from runners.inference_policy import resolve_response_format
+from runners.inference_policy import (
+    DEFAULT_TASK_OUTPUT_BUDGETS,
+    DEFAULT_THINKING_POLICY,
+    PROMPT_POLICY_V0,
+    PROMPT_POLICY_V1_CONCISE,
+    PROMPT_POLICY_V2_ANSWER_ONLY,
+    PROMPT_POLICY_V3_FEW_SHOT,
+    PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
+    resolve_response_format,
+)
 from runners.ollama_runner import OllamaProvider
 from runners.outcome_schema import ModelOutcome, RunManifest
 from runners.storage import (
@@ -39,6 +48,14 @@ from runners.storage import (
 from runners.vllm_runner import MockInferenceProvider, VLLMProvider
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_PROMPT_POLICIES = {
+    PROMPT_POLICY_V0,
+    PROMPT_POLICY_V1_CONCISE,
+    PROMPT_POLICY_V2_ANSWER_ONLY,
+    PROMPT_POLICY_V3_FEW_SHOT,
+    PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +105,52 @@ def compute_file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def compute_experiment_fingerprint(
+    benchmark_split: str,
+    split_file_sha256: str,
+    benchmark_manifest_sha256: str,
+    model_ids: list[str],
+    model_tags: dict[str, str],
+    models_config_sha256: str,
+    prompt_policy_version: str,
+    output_budget: int | None,
+    think: bool | None,
+    temperature: float,
+    seed: int,
+    backend: str,
+    response_schema: dict[str, Any] | None,
+    target_quality: float,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Compute a deterministic cryptographic fingerprint of the entire execution configuration.
+    Includes benchmark split hash, candidate models & tags, prompt policy, budget,
+    sampling parameters, backend, schema, and scoring configuration.
+    Returns (sha256_hex_digest, canonical_config_dict).
+    """
+    canonical_dict: dict[str, Any] = {
+        "backend": backend.lower(),
+        "benchmark_manifest_sha256": benchmark_manifest_sha256,
+        "benchmark_split": benchmark_split,
+        "benchmark_split_file_sha256": split_file_sha256,
+        "candidate_models": sorted(model_ids),
+        "candidate_model_tags": {m: model_tags.get(m, "") for m in sorted(model_ids)},
+        "models_config_sha256": models_config_sha256,
+        "outcome_schema_version": "1.0.0",
+        "output_budget": output_budget,
+        "prompt_policy_version": prompt_policy_version,
+        "response_schema": response_schema,
+        "scorer_name": "OutcomeScorer",
+        "scorer_version": "1.0.0",
+        "seed": seed,
+        "target_quality": target_quality,
+        "temperature": temperature,
+        "think": think,
+    }
+    serialized = json.dumps(canonical_dict, sort_keys=True)
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return digest, canonical_dict
+
+
 def plan_matrix_attempts(
     prompts: list[BenchmarkPrompt],
     models: list[ModelConfig],
@@ -112,7 +175,7 @@ def plan_matrix_attempts(
 
 
 # ---------------------------------------------------------------------------
-# Deterministic Deduplication
+# Deterministic Deduplication & History Preservation
 # ---------------------------------------------------------------------------
 
 def deduplicate_outcomes(
@@ -123,6 +186,10 @@ def deduplicate_outcomes(
     Resolution rule:
       1. Prefer SUCCESS over non-SUCCESS (FAILED, TRUNCATED, etc.).
       2. If both have identical status class, prefer the later request_timestamp.
+    Crucial Guarantee:
+      A successful retry or winner NEVER erases evidence that an earlier attempt failed.
+      The loser's telemetry (timestamp, status, latency, error_message) is merged into
+      the winner's attempt_history, and retry_count is incremented cumulatively.
     Returns (deduplicated_list, duplicate_count).
     """
     seen: dict[tuple[str, str], ModelOutcome] = {}
@@ -133,14 +200,57 @@ def deduplicate_outcomes(
         if key in seen:
             duplicates += 1
             existing = seen[key]
-            # Rule 1: Prefer SUCCESS
+
+            # Merge attempt history from both records
+            merged_history = list(existing.attempt_history)
+            existing_record = {
+                "timestamp": existing.request_timestamp,
+                "status": existing.status,
+                "latency_ms": existing.latency_ms,
+                "error_type": existing.error_type,
+                "error_message": existing.error_message,
+                "prompt_tokens": existing.prompt_tokens,
+                "output_tokens": existing.output_tokens,
+                "run_id": existing.run_id,
+            }
+            if not any(h.get("timestamp") == existing.request_timestamp for h in merged_history):
+                merged_history.append(existing_record)
+
+            for h in outcome.attempt_history:
+                if h not in merged_history:
+                    merged_history.append(h)
+
+            outcome_record = {
+                "timestamp": outcome.request_timestamp,
+                "status": outcome.status,
+                "latency_ms": outcome.latency_ms,
+                "error_type": outcome.error_type,
+                "error_message": outcome.error_message,
+                "prompt_tokens": outcome.prompt_tokens,
+                "output_tokens": outcome.output_tokens,
+                "run_id": outcome.run_id,
+            }
+            if not any(h.get("timestamp") == outcome.request_timestamp for h in merged_history):
+                merged_history.append(outcome_record)
+
+            # Determine primary winner
             if existing.status != "SUCCESS" and outcome.status == "SUCCESS":
-                seen[key] = outcome
+                winner = outcome
             elif existing.status == "SUCCESS" and outcome.status != "SUCCESS":
-                pass  # keep existing
-            # Rule 2: Prefer later timestamp
+                winner = existing
             elif outcome.request_timestamp > existing.request_timestamp:
-                seen[key] = outcome
+                winner = outcome
+            else:
+                winner = existing
+
+            total_retries = existing.retry_count + outcome.retry_count + 1
+            winner_with_history = winner.model_copy(
+                update={
+                    "attempt_history": merged_history,
+                    "retry_count": total_retries,
+                }
+            )
+            seen[key] = winner_with_history
         else:
             seen[key] = outcome
 
@@ -342,62 +452,99 @@ def atomic_save_manifest(manifest: RunManifest, target_path: Path) -> None:
     os.replace(tmp_path, target_path)
 
 
+def check_smoke_artifact_collision(output_dir: Path, force: bool = False) -> None:
+    """
+    Guard against mixing smoke test artifacts and matrix run artifacts.
+    Prevents accidental corruption of smoke benchmarks.
+    """
+    if force:
+        return
+    smoke_indicators = ["smoke_manifest.json", "smoke_outcomes.parquet", "smoke_scores.parquet"]
+    found = [f for f in smoke_indicators if (output_dir / f).exists()]
+    if found:
+        raise ConfigurationMismatchError(
+            f"Output directory '{output_dir}' contains smoke test artifacts ({', '.join(found)}). "
+            f"Refusing to execute matrix run in a smoke directory to avoid artifact pollution. "
+            f"Specify a dedicated matrix directory (e.g. data/outcomes/matrix_train) or use --force."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Configuration & Resume Verification
 # ---------------------------------------------------------------------------
 
 def validate_resume_compatibility(
     existing_manifest: RunManifest,
-    expected_benchmark_checksum: str,
-    expected_models_checksum: str,
-    prompt_policy_version: str,
-    output_budget: int | None,
-    backend: str,
-    split: str,
+    expected_fingerprint: str,
+    expected_config: dict[str, Any],
     run_id: str | None = None,
 ) -> None:
     """
     Verify that an existing RunManifest in output_dir is strictly compatible with the
-    current execution parameters. Raises ConfigurationMismatchError if any setting conflicts.
+    current execution parameters using cryptographic experiment fingerprinting.
+    Raises ConfigurationMismatchError if any setting conflicts.
     """
+    settings = existing_manifest.effective_inference_settings or {}
+    prev_fingerprint = settings.get("experiment_fingerprint")
+
+    # If fingerprint matches exactly, configuration is 100% verified identical
+    if prev_fingerprint and prev_fingerprint == expected_fingerprint:
+        if run_id and existing_manifest.run_id != run_id:
+            raise ConfigurationMismatchError(
+                f"run_id mismatch: existing run_id='{existing_manifest.run_id}', requested='{run_id}'"
+            )
+        return
+
+    # Otherwise, perform fine-grained parameter diff to generate actionable error
     mismatches: list[str] = []
 
-    if existing_manifest.benchmark_manifest_checksum != expected_benchmark_checksum:
-        mismatches.append(
-            f"benchmark_manifest_checksum mismatch: existing='{existing_manifest.benchmark_manifest_checksum}', "
-            f"expected='{expected_benchmark_checksum}'"
-        )
+    # 1. Benchmark split and file checksums
+    prev_split = settings.get("benchmark_split") or settings.get("split")
+    if prev_split and prev_split != expected_config["benchmark_split"]:
+        mismatches.append(f"benchmark_split mismatch: existing='{prev_split}', current='{expected_config['benchmark_split']}'")
 
-    if existing_manifest.prompt_policy_version != prompt_policy_version:
-        mismatches.append(
-            f"prompt_policy_version mismatch: existing='{existing_manifest.prompt_policy_version}', "
-            f"current='{prompt_policy_version}'"
-        )
+    prev_split_sha = settings.get("benchmark_split_file_sha256")
+    if prev_split_sha and prev_split_sha != expected_config["benchmark_split_file_sha256"]:
+        mismatches.append(f"benchmark_split_file_sha256 mismatch: existing='{prev_split_sha}', expected='{expected_config['benchmark_split_file_sha256']}'")
 
-    if existing_manifest.output_budget != output_budget:
-        mismatches.append(
-            f"output_budget mismatch: existing='{existing_manifest.output_budget}', "
-            f"current='{output_budget}'"
-        )
+    if existing_manifest.benchmark_manifest_checksum != expected_config["benchmark_manifest_sha256"]:
+        mismatches.append(f"benchmark_manifest_checksum mismatch: existing='{existing_manifest.benchmark_manifest_checksum}', expected='{expected_config['benchmark_manifest_sha256']}'")
 
-    # Check effective settings
-    settings = existing_manifest.effective_inference_settings or {}
+    # 2. Candidate models
+    prev_models = sorted(existing_manifest.per_model_counts.keys())
+    cur_models = expected_config["candidate_models"]
+    if prev_models != cur_models:
+        mismatches.append(f"candidate_models mismatch: existing={prev_models}, current={cur_models}")
+
+    # 3. Policy and budget
+    if existing_manifest.prompt_policy_version != expected_config["prompt_policy_version"]:
+        mismatches.append(f"prompt_policy_version mismatch: existing='{existing_manifest.prompt_policy_version}', current='{expected_config['prompt_policy_version']}'")
+
+    if existing_manifest.output_budget != expected_config["output_budget"]:
+        mismatches.append(f"output_budget mismatch: existing={existing_manifest.output_budget}, current={expected_config['output_budget']}")
+
+    # 4. Sampling & execution parameters
     prev_backend = settings.get("backend")
-    if prev_backend and prev_backend.lower() != backend.lower():
-        mismatches.append(
-            f"backend mismatch: existing='{prev_backend}', current='{backend}'"
-        )
+    if prev_backend and prev_backend.lower() != expected_config["backend"].lower():
+        mismatches.append(f"backend mismatch: existing='{prev_backend}', current='{expected_config['backend']}'")
 
-    prev_split = settings.get("benchmark_split")
-    if prev_split and prev_split != split:
-        mismatches.append(
-            f"benchmark_split mismatch: existing='{prev_split}', current='{split}'"
-        )
+    prev_think = settings.get("think")
+    if prev_think is not None and prev_think != expected_config["think"]:
+        mismatches.append(f"think mismatch: existing={prev_think}, current={expected_config['think']}")
+
+    prev_temp = settings.get("temperature")
+    if prev_temp is not None and prev_temp != expected_config["temperature"]:
+        mismatches.append(f"temperature mismatch: existing={prev_temp}, current={expected_config['temperature']}")
+
+    prev_seed = existing_manifest.seed
+    if prev_seed != expected_config["seed"]:
+        mismatches.append(f"seed mismatch: existing={prev_seed}, current={expected_config['seed']}")
 
     if run_id and existing_manifest.run_id != run_id:
-        mismatches.append(
-            f"run_id mismatch: existing run_id='{existing_manifest.run_id}', requested='{run_id}'"
-        )
+        mismatches.append(f"run_id mismatch: existing='{existing_manifest.run_id}', requested='{run_id}'")
+
+    if not mismatches and prev_fingerprint != expected_fingerprint:
+        mismatches.append(f"experiment_fingerprint mismatch: existing='{prev_fingerprint}', expected='{expected_fingerprint}'")
 
     if mismatches:
         err_msg = (
@@ -428,6 +575,8 @@ def build_run_manifest(
     temperature: float,
     timeout_seconds: float,
     think: bool | None,
+    experiment_fingerprint: str | None = None,
+    experiment_config: dict[str, Any] | None = None,
 ) -> RunManifest:
     """Build a complete, strongly-validated RunManifest from current state."""
     expected_rows = len(prompts) * len(models)
@@ -461,6 +610,21 @@ def build_run_manifest(
     else:
         schema_dict = schema_used
 
+    effective_settings: dict[str, Any] = {
+        "temperature": temperature,
+        "seed": seed,
+        "timeout_seconds": timeout_seconds,
+        "think": think,
+        "max_output_tokens": output_budget,
+        "backend": backend,
+        "benchmark_split": split,
+        "flush_interval": flush_interval,
+    }
+    if experiment_fingerprint:
+        effective_settings["experiment_fingerprint"] = experiment_fingerprint
+    if experiment_config:
+        effective_settings["experiment_config"] = experiment_config
+
     return RunManifest(
         run_id=run_id,
         benchmark_manifest_checksum=benchmark_manifest_checksum,
@@ -481,16 +645,7 @@ def build_run_manifest(
         prompt_policy_version=prompt_policy_version,
         response_schema=schema_dict,
         output_budget=output_budget,
-        effective_inference_settings={
-            "temperature": temperature,
-            "seed": seed,
-            "timeout_seconds": timeout_seconds,
-            "think": think,
-            "max_output_tokens": output_budget,
-            "backend": backend,
-            "benchmark_split": split,
-            "flush_interval": flush_interval,
-        },
+        effective_inference_settings=effective_settings,
     )
 
 
@@ -591,6 +746,7 @@ def run_matrix(
     dry_run: bool = False,
     force: bool = False,
     limit: int | None = None,
+    retry_failed: bool = False,
     providers_override: dict[str, InferenceProvider] | None = None,
 ) -> tuple[list[ModelOutcome], list[ScoreOutcome], RunManifest]:
     """
@@ -598,6 +754,15 @@ def run_matrix(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 0. Policy & smoke collision validation
+    if prompt_policy_version not in SUPPORTED_PROMPT_POLICIES:
+        raise ValueError(
+            f"Unknown prompt policy version: '{prompt_policy_version}'. "
+            f"Supported versions: {sorted(SUPPORTED_PROMPT_POLICIES)}"
+        )
+
+    check_smoke_artifact_collision(output_dir=output_dir, force=force)
 
     # 1. Load benchmark split
     split_file = processed_dir / f"benchmark_{split}.jsonl"
@@ -610,16 +775,45 @@ def run_matrix(
     # 2. Load model registry & pricing
     registry = load_model_registry(models_config_path)
     pricing_map = load_pricing_config(pricing_config_path)
-    models = registry.enabled_models()
-    if model_ids:
-        models = [m for m in models if m.id in model_ids]
-        if not models:
-            raise ValueError(f"No enabled models matched requested IDs: {model_ids}")
 
-    # 3. Checksums
+    all_registered_ids = {m.id for m in registry.models}
+    if model_ids:
+        unknown_ids = set(model_ids) - all_registered_ids
+        if unknown_ids:
+            raise ValueError(f"Unknown candidate model IDs requested: {sorted(unknown_ids)}")
+        models = [m for m in registry.models if m.id in model_ids and m.routing.enabled]
+        if not models:
+            raise ValueError(f"None of requested model IDs {model_ids} are enabled in {models_config_path}")
+    else:
+        models = registry.enabled_models()
+
+    # 3. Checksums & experiment fingerprint
+    split_file_sha = compute_file_sha256(split_file)
     bench_manifest_file = processed_dir / "benchmark_manifest.json"
     bench_checksum = compute_file_sha256(bench_manifest_file) if bench_manifest_file.exists() else "unknown"
     models_checksum = compute_file_sha256(models_config_path)
+
+    effective_backend = "mock" if use_mock else (backend or "ollama")
+    schema_used = resolve_response_format(policy_version=prompt_policy_version)
+    schema_dict = {"format": schema_used} if isinstance(schema_used, str) else schema_used
+    model_tags = {m.id: m.model_name for m in models}
+
+    experiment_fingerprint, experiment_config = compute_experiment_fingerprint(
+        benchmark_split=split,
+        split_file_sha256=split_file_sha,
+        benchmark_manifest_sha256=bench_checksum,
+        model_ids=[m.id for m in models],
+        model_tags=model_tags,
+        models_config_sha256=models_checksum,
+        prompt_policy_version=prompt_policy_version,
+        output_budget=max_output_tokens,
+        think=think,
+        temperature=temperature,
+        seed=seed,
+        backend=effective_backend,
+        response_schema=schema_dict,
+        target_quality=0.80,
+    )
 
     # 4. Plan attempts
     planned_attempts = plan_matrix_attempts(prompts, models)
@@ -632,7 +826,6 @@ def run_matrix(
     scores_path = output_dir / "matrix_scores.parquet"
     manifest_path = output_dir / "matrix_manifest.json"
 
-    effective_backend = "mock" if use_mock else (backend or "ollama")
     existing_manifest: RunManifest | None = None
     existing_outcomes: list[ModelOutcome] = []
     existing_scores: list[ScoreOutcome] = []
@@ -646,12 +839,8 @@ def run_matrix(
     if existing_manifest and not force:
         validate_resume_compatibility(
             existing_manifest=existing_manifest,
-            expected_benchmark_checksum=bench_checksum,
-            expected_models_checksum=models_checksum,
-            prompt_policy_version=prompt_policy_version,
-            output_budget=max_output_tokens,
-            backend=effective_backend,
-            split=split,
+            expected_fingerprint=experiment_fingerprint,
+            expected_config=experiment_config,
             run_id=run_id,
         )
 
@@ -667,10 +856,30 @@ def run_matrix(
         if dup_scores > 0:
             logger.warning(f"Deduplicated {dup_scores} duplicate score rows loaded from {scores_path}.")
 
+        # Reconcile missing scores if previous run crashed after saving outcomes but before scores
+        if len(existing_outcomes) > len(existing_scores):
+            scored_keys = {(s.prompt_id, s.model_id) for s in existing_scores}
+            prompt_map = {p.prompt_id: p for p in prompts}
+            scorer_reconcile = OutcomeScorer(benchmark_manifest_checksum=bench_checksum)
+            unscored = [o for o in existing_outcomes if (o.prompt_id, o.model_id) not in scored_keys]
+            if unscored:
+                logger.info(f"Reconciling {len(unscored)} unscored outcomes from previous interrupted flush.")
+                for o in unscored:
+                    sc = scorer_reconcile.score_outcome(o, prompt=prompt_map.get(o.prompt_id))
+                    existing_scores.append(sc)
+                atomic_save_scores(existing_scores, scores_path)
+
     # Establish canonical completed keys
-    completed_keys: set[tuple[str, str]] = {
-        (o.prompt_id, o.model_id) for o in existing_outcomes
-    }
+    if retry_failed:
+        # If retry_failed is True, only SUCCESS and TRUNCATED count as completed
+        completed_keys: set[tuple[str, str]] = {
+            (o.prompt_id, o.model_id) for o in existing_outcomes if o.status in ["SUCCESS", "TRUNCATED"]
+        }
+    else:
+        # Default: all persisted outcomes count as completed
+        completed_keys = {
+            (o.prompt_id, o.model_id) for o in existing_outcomes
+        }
 
     # Determine pending attempts
     pending_attempts = [
@@ -687,15 +896,33 @@ def run_matrix(
 
     # Handle dry-run mode
     if dry_run:
+        policy_descriptions = {
+            PROMPT_POLICY_V0: "Original benchmark prompt unmodified (unconstrained generation)",
+            PROMPT_POLICY_V1_CONCISE: "Concise derivation ending with 'Final Answer: <letter>'",
+            PROMPT_POLICY_V2_ANSWER_ONLY: "Strict answer-only prompt (negative constraint: no reasoning/explanation)",
+            PROMPT_POLICY_V3_FEW_SHOT: "1-shot synthetic demonstration prompt",
+            PROMPT_POLICY_V4_STRUCTURED_OUTPUT: "Native Ollama structured JSON schema enum constraint",
+        }
+        policy_desc = policy_descriptions.get(prompt_policy_version, "Custom prompt policy")
+        budget_desc = f"{max_output_tokens} tokens (explicit override)" if max_output_tokens else f"dynamic per task (multiple_choice: {DEFAULT_TASK_OUTPUT_BUDGETS['multiple_choice']}, exact_match: {DEFAULT_TASK_OUTPUT_BUDGETS['exact_match']}, classification: {DEFAULT_TASK_OUTPUT_BUDGETS['classification']})"
+        think_desc = f"{think} (explicit override)" if think is not None else f"dynamic default (multiple_choice: {DEFAULT_THINKING_POLICY['multiple_choice']}, exact_match: {DEFAULT_THINKING_POLICY['exact_match']})"
+
         print("=== Matrix Runner Dry Run ===")
         print(f"Benchmark Split: {split} ({split_file})")
+        print(f"Split File SHA-256: {split_file_sha}")
         print(f"Prompts Loaded: {len(prompts)}")
         print(f"Candidate Models: {[m.id for m in models]}")
+        print(f"Candidate Model Tags: {model_tags}")
+        print(f"Backend: {effective_backend}")
         print(f"Total Planned Attempts: {total_planned}")
         print(f"Previously Completed Attempts: {len(completed_keys)}")
         print(f"Pending Attempts to Execute: {len(pending_attempts)}")
-        print(f"Prompt Policy Version: {prompt_policy_version}")
-        print(f"Output Budget: {max_output_tokens} tokens")
+        print(f"Prompt Policy Version: {prompt_policy_version} ({policy_desc})")
+        print(f"Output Budget: {budget_desc}")
+        print(f"Thinking Mode: {think_desc}")
+        print(f"Response Schema: {schema_dict}")
+        print(f"Sampling Parameters: temperature={temperature}, seed={seed}, timeout={timeout_seconds}s")
+        print(f"Experiment Fingerprint: {experiment_fingerprint}")
         print(f"Target Output Directory: {output_dir}")
         print(f"Dry run complete. No inference executed.")
 
@@ -716,6 +943,8 @@ def run_matrix(
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             think=think,
+            experiment_fingerprint=experiment_fingerprint,
+            experiment_config=experiment_config,
         )
         return existing_outcomes, existing_scores, manifest
 
@@ -745,11 +974,13 @@ def run_matrix(
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             think=think,
+            experiment_fingerprint=experiment_fingerprint,
+            experiment_config=experiment_config,
         )
         return existing_outcomes, existing_scores, manifest
 
     # 6. Initialize providers
-    providers: dict[str, BaseInferenceProvider] = {}
+    providers: dict[str, InferenceProvider] = {}
     if providers_override:
         providers = providers_override
     else:
@@ -784,9 +1015,16 @@ def run_matrix(
 
     # Helper function for atomic checkpoint flush
     def flush_checkpoint() -> None:
-        atomic_save_outcomes(outcomes, outcomes_path)
+        nonlocal outcomes, scores
+        deduped_outcomes, _ = deduplicate_outcomes(outcomes)
+        outcomes = deduped_outcomes
+        atomic_save_outcomes(deduped_outcomes, outcomes_path)
+
         if score_outcomes:
-            atomic_save_scores(scores, scores_path)
+            deduped_scores, _ = deduplicate_scores(scores)
+            scores = deduped_scores
+            atomic_save_scores(deduped_scores, scores_path)
+
         manifest = build_run_manifest(
             run_id=active_run_id,
             benchmark_manifest_checksum=bench_checksum,
@@ -794,7 +1032,7 @@ def run_matrix(
             seed=seed,
             prompts=prompts,
             models=models,
-            outcomes=outcomes,
+            outcomes=deduped_outcomes,
             prompt_policy_version=prompt_policy_version,
             output_budget=max_output_tokens,
             backend=effective_backend,
@@ -803,6 +1041,8 @@ def run_matrix(
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             think=think,
+            experiment_fingerprint=experiment_fingerprint,
+            experiment_config=experiment_config,
         )
         atomic_save_manifest(manifest, manifest_path)
 
@@ -866,6 +1106,8 @@ def run_matrix(
         temperature=temperature,
         timeout_seconds=timeout_seconds,
         think=think,
+        experiment_fingerprint=experiment_fingerprint,
+        experiment_config=experiment_config,
     )
 
     print("\n=== Matrix Run Completed ===")
@@ -874,6 +1116,7 @@ def run_matrix(
     print(f"Actual Outcomes: {final_manifest.actual_outcome_rows}")
     print(f"Success Count: {final_manifest.success_count}")
     print(f"Failure Count: {final_manifest.failure_count}")
+    print(f"Experiment Fingerprint: {experiment_fingerprint}")
     print(f"Artifacts persisted to: {output_dir}")
 
     return outcomes, scores, final_manifest
@@ -908,6 +1151,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Report planned attempts and exit without invoking inference")
     parser.add_argument("--force", action="store_true", help="Force execution even if existing manifest settings conflict")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of planned attempts (for testing/partial runs)")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry existing attempts with FAILED/TIMEOUT/BACKEND_UNAVAILABLE status")
 
     args = parser.parse_args()
 
@@ -933,6 +1177,7 @@ def main() -> None:
             dry_run=args.dry_run,
             force=args.force,
             limit=args.limit,
+            retry_failed=args.retry_failed,
         )
     except ConfigurationMismatchError as exc:
         print(f"\n[CONFIGURATION ERROR] {exc}", file=sys.stderr)

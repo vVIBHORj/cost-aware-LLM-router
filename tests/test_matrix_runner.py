@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from eval.scoring_schema import ScoreOutcome
+from eval.storage import load_scores_parquet
 from router.benchmark_schema import BenchmarkPrompt
 from router.config import ModelConfig, load_model_registry
 from runners.inference import GenerationRequest, GenerationResult, InferenceProvider
@@ -673,3 +674,233 @@ def test_dry_run_mode(synthetic_env):
     assert not (output_dir / "matrix_outcomes.parquet").exists()
     assert not (output_dir / "matrix_manifest.json").exists()
     assert manifest.expected_outcome_rows == 6
+
+
+# ---------------------------------------------------------------------------
+# Phase 4O Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_unknown_policy_and_model_ids_fail_before_inference(synthetic_env):
+    """Test that unknown policy versions or model IDs fail immediately before any inference."""
+    processed_dir, output_dir = synthetic_env
+    registry = load_model_registry("configs/models.yaml")
+    model = registry.enabled_models()[0]
+    provider = SpyMockProvider(model_config=model)
+
+    # 1. Unknown prompt policy version fails
+    with pytest.raises(ValueError, match="Unknown prompt policy version: 'v99_invalid'"):
+        run_matrix(
+            split="train",
+            processed_dir=processed_dir,
+            output_dir=output_dir,
+            model_ids=[model.id],
+            prompt_policy_version="v99_invalid",
+            providers_override={model.id: provider},
+        )
+    assert len(provider.call_history) == 0
+
+    # 2. Unknown model ID fails
+    with pytest.raises(ValueError, match="Unknown candidate model IDs requested: \\['nonexistent-model'\\]"):
+        run_matrix(
+            split="train",
+            processed_dir=processed_dir,
+            output_dir=output_dir,
+            model_ids=["nonexistent-model"],
+            providers_override={model.id: provider},
+        )
+    assert len(provider.call_history) == 0
+
+
+def test_smoke_artifact_collision_blocks_run_without_force(synthetic_env):
+    """Test that pointing to an output directory containing smoke-run artifacts is rejected."""
+    processed_dir, output_dir = synthetic_env
+    registry = load_model_registry("configs/models.yaml")
+    model = registry.enabled_models()[0]
+    provider = SpyMockProvider(model_config=model)
+
+    # Seed smoke manifest in output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "smoke_manifest.json").write_text("{}", encoding="utf-8")
+
+    # Rejection without force
+    with pytest.raises(ConfigurationMismatchError, match="contains smoke test artifacts"):
+        run_matrix(
+            split="train",
+            processed_dir=processed_dir,
+            output_dir=output_dir,
+            model_ids=[model.id],
+            providers_override={model.id: provider},
+            force=False,
+            limit=1,
+        )
+
+    # Permitted with --force
+    outcomes, _, _ = run_matrix(
+        split="train",
+        processed_dir=processed_dir,
+        output_dir=output_dir,
+        model_ids=[model.id],
+        providers_override={model.id: provider},
+        force=True,
+        limit=1,
+    )
+    assert len(outcomes) == 1
+
+
+def test_experiment_fingerprint_sensitivity(synthetic_env):
+    """Test that any configuration change produces a distinct experiment fingerprint."""
+    from runners.matrix_runner import compute_experiment_fingerprint
+
+    base_args = {
+        "benchmark_split": "train",
+        "split_file_sha256": "abc123",
+        "benchmark_manifest_sha256": "def456",
+        "model_ids": ["qwen3-1.7b", "qwen3-4b"],
+        "model_tags": {"qwen3-1.7b": "Qwen/Qwen3-1.7B", "qwen3-4b": "Qwen/Qwen3-4B"},
+        "models_config_sha256": "ghi789",
+        "prompt_policy_version": "v0",
+        "output_budget": 512,
+        "think": False,
+        "temperature": 0.0,
+        "seed": 42,
+        "backend": "ollama",
+        "response_schema": None,
+        "target_quality": 0.80,
+    }
+
+    fp_base, _ = compute_experiment_fingerprint(**base_args)
+    assert len(fp_base) == 64
+
+    # 1. Same config -> identical fingerprint
+    fp_same, _ = compute_experiment_fingerprint(**base_args)
+    assert fp_base == fp_same
+
+    # 2. Different policy -> different fingerprint
+    fp_policy, _ = compute_experiment_fingerprint(**{**base_args, "prompt_policy_version": "v4_structured_output"})
+    assert fp_policy != fp_base
+
+    # 3. Different temperature -> different fingerprint
+    fp_temp, _ = compute_experiment_fingerprint(**{**base_args, "temperature": 0.7})
+    assert fp_temp != fp_base
+
+    # 4. Different split hash -> different fingerprint
+    fp_sha, _ = compute_experiment_fingerprint(**{**base_args, "split_file_sha256": "altered_hash"})
+    assert fp_sha != fp_base
+
+    # 5. Different model tag -> different fingerprint
+    fp_tag, _ = compute_experiment_fingerprint(**{**base_args, "model_tags": {"qwen3-1.7b": "custom_tag", "qwen3-4b": "Qwen/Qwen3-4B"}})
+    assert fp_tag != fp_base
+
+
+def test_unscored_outcomes_reconciled_on_resume(synthetic_env):
+    """Test that outcomes persisted without corresponding scores are automatically reconciled upon resume."""
+    processed_dir, output_dir = synthetic_env
+    registry = load_model_registry("configs/models.yaml")
+    model = registry.enabled_models()[0]
+    provider = SpyMockProvider(model_config=model)
+
+    # Run 3 attempts with scoring disabled
+    run_matrix(
+        split="train",
+        processed_dir=processed_dir,
+        output_dir=output_dir,
+        model_ids=[model.id],
+        providers_override={model.id: provider},
+        score_outcomes=False,
+    )
+
+    outcomes_path = output_dir / "matrix_outcomes.parquet"
+    scores_path = output_dir / "matrix_scores.parquet"
+    assert outcomes_path.exists()
+    assert not scores_path.exists()
+
+    # Now resume with scoring enabled -> scores must be generated for the existing outcomes without re-running inference!
+    spy_resume = SpyMockProvider(model_config=model)
+    outcomes, scores, manifest = run_matrix(
+        split="train",
+        processed_dir=processed_dir,
+        output_dir=output_dir,
+        model_ids=[model.id],
+        providers_override={model.id: spy_resume},
+        score_outcomes=True,
+    )
+
+    # Zero inference calls made because all 3 were already completed
+    assert len(spy_resume.call_history) == 0
+    assert len(outcomes) == 3
+    assert len(scores) == 3
+    assert scores_path.exists()
+    loaded_scores = load_scores_parquet(scores_path)
+    assert len(loaded_scores) == 3
+
+
+def test_retry_failed_preserves_prior_attempt_history(synthetic_env):
+    """Test that --retry-failed re-evaluates failed attempts and preserves prior failure details in attempt_history."""
+    processed_dir, output_dir = synthetic_env
+    registry = load_model_registry("configs/models.yaml")
+    model = registry.enabled_models()[0]
+
+    # Initial run: prompt synth-002 fails
+    p1 = SpyMockProvider(model_config=model, fail_prompts={"synth-002"})
+    run_matrix(
+        split="train",
+        processed_dir=processed_dir,
+        output_dir=output_dir,
+        model_ids=[model.id],
+        providers_override={model.id: p1},
+    )
+
+    outcomes_p1 = load_outcomes_parquet(output_dir / "matrix_outcomes.parquet")
+    o2_fail = next(o for o in outcomes_p1 if o.prompt_id == "synth-002")
+    assert o2_fail.status == "FAILED"
+
+    # Second run with retry_failed=True and healthy provider
+    p2 = SpyMockProvider(model_config=model)
+    outcomes_p2, _, manifest = run_matrix(
+        split="train",
+        processed_dir=processed_dir,
+        output_dir=output_dir,
+        model_ids=[model.id],
+        providers_override={model.id: p2},
+        retry_failed=True,
+    )
+
+    # Provider 2 must only have been called for synth-002 (the failed prompt)
+    assert p2.call_history == [("synth-002", model.id)]
+    assert manifest.actual_outcome_rows == 3
+
+    # Inspect the new outcome for synth-002
+    o2_new = next(o for o in outcomes_p2 if o.prompt_id == "synth-002")
+    assert o2_new.status == "SUCCESS"
+    assert o2_new.retry_count >= 1
+    # Evidence of earlier failure is preserved in attempt_history
+    assert len(o2_new.attempt_history) >= 1
+    assert any(h.get("status") == "FAILED" for h in o2_new.attempt_history)
+
+
+def test_dry_run_displays_detailed_policy_and_budget(synthetic_env, capsys):
+    """Test that dry-run outputs detailed policy, budget, model tags, and fingerprint."""
+    processed_dir, output_dir = synthetic_env
+    registry = load_model_registry("configs/models.yaml")
+    model = registry.enabled_models()[0]
+
+    run_matrix(
+        split="train",
+        processed_dir=processed_dir,
+        output_dir=output_dir,
+        model_ids=[model.id],
+        prompt_policy_version="v4_structured_output",
+        max_output_tokens=64,
+        think=False,
+        dry_run=True,
+        providers_override={model.id: SpyMockProvider(model_config=model)},
+    )
+
+    captured = capsys.readouterr().out
+    assert "Prompt Policy Version: v4_structured_output" in captured
+    assert "Output Budget: 64 tokens (explicit override)" in captured
+    assert "Thinking Mode: False (explicit override)" in captured
+    assert "Response Schema:" in captured
+    assert "Experiment Fingerprint:" in captured
+    assert "Dry run complete. No inference executed." in captured
+
