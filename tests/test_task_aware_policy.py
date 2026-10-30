@@ -6,6 +6,7 @@ from eval.scorers.multiple_choice import extract_mc_choice, score_multiple_choic
 from eval.scorers.exact_match import extract_final_answer, score_exact_match
 from runners.inference_policy import (
     PROMPT_POLICY_TASK_AWARE,
+    PROMPT_POLICY_TASK_AWARE_CANDIDATE,
     PROMPT_POLICY_V0,
     PROMPT_POLICY_V1_CONCISE,
     PROMPT_POLICY_V2_ANSWER_ONLY,
@@ -255,3 +256,70 @@ def test_complete_answer_followed_by_extra_text_exact_match():
 
     res = score_exact_match("Step 1: calculate 5+7=12.\nFinal Answer: 12\nDone.", "12")
     assert res["quality_score"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 5. Candidate policy dispatch and targeted budget adjustments
+# ---------------------------------------------------------------------------
+
+def test_task_aware_candidate_dispatch_classification_budget():
+    p = dispatch_task_policy(
+        "Passage: ... Question: Is this true?",
+        task_type="classification",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+    )
+    assert p.policy_version == PROMPT_POLICY_V2_ANSWER_ONLY
+    assert p.output_budget == 128
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+    assert p.compatible_scorer == "exact_match_scorer"
+
+
+def test_task_aware_candidate_dispatch_summarization_budget():
+    p = dispatch_task_policy(
+        "Long news article text...",
+        task_type="summarization",
+        evaluation_type="reference_based",
+        requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+    )
+    assert p.policy_version == PROMPT_POLICY_V1_CONCISE
+    assert p.output_budget == 384
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+    assert p.compatible_scorer == "reference_based_scorer"
+
+
+def test_task_aware_candidate_dispatch_preserves_other_tasks():
+    # MC: 64
+    p_mc = dispatch_task_policy("Question\nA. 1\nB. 2", task_type="qa", evaluation_type="multiple_choice", requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+    assert p_mc.output_budget == 64
+    assert p_mc.policy_version == PROMPT_POLICY_V4_STRUCTURED_OUTPUT
+
+    # Reasoning: 256
+    p_reas = dispatch_task_policy("Evaluate True and False", task_type="reasoning", evaluation_type="exact_match", requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+    assert p_reas.output_budget == 256
+
+    # Coding: 512
+    p_code = dispatch_task_policy("Write code", task_type="coding", evaluation_type="code_execution", requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+    assert p_code.output_budget == 512
+
+    # Math: 512
+    p_math = dispatch_task_policy("Solve math", task_type="math", evaluation_type="exact_match", requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+    assert p_math.output_budget == 512
+
+    # IFEval: 1024
+    p_if = dispatch_task_policy("Write essay", task_type="instruction_following", evaluation_type="ifeval", requested_policy=PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+    assert p_if.output_budget == 1024
+
+
+def test_task_aware_custom_budgets_override():
+    p = dispatch_task_policy(
+        "Passage: ... Question: Is this true?",
+        task_type="classification",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_TASK_AWARE,
+        custom_budgets={"classification": 200},
+    )
+    assert p.output_budget == 200
+

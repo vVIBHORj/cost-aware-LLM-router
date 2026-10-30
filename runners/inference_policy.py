@@ -80,6 +80,7 @@ PROMPT_POLICY_V2_ANSWER_ONLY = "v2_answer_only"
 PROMPT_POLICY_V3_FEW_SHOT = "v3_few_shot"
 PROMPT_POLICY_V4_STRUCTURED_OUTPUT = "v4_structured_output"
 PROMPT_POLICY_TASK_AWARE = "task_aware"
+PROMPT_POLICY_TASK_AWARE_CANDIDATE = "task_aware_candidate"
 
 SUPPORTED_PROMPT_POLICIES = {
     PROMPT_POLICY_V0,
@@ -88,6 +89,7 @@ SUPPORTED_PROMPT_POLICIES = {
     PROMPT_POLICY_V3_FEW_SHOT,
     PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
     PROMPT_POLICY_TASK_AWARE,
+    PROMPT_POLICY_TASK_AWARE_CANDIDATE,
 }
 
 COMPATIBLE_SCORERS: dict[str, tuple[str, str]] = {
@@ -326,6 +328,7 @@ def dispatch_task_policy(
     user_output_budget: int | None = None,
     user_think: bool | None = None,
     response_format: dict[str, Any] | str | None = None,
+    custom_budgets: dict[str, int] | None = None,
 ) -> DispatchedTaskPolicy:
     """
     Select explicit inference settings based on task type and evaluation type.
@@ -373,62 +376,67 @@ def dispatch_task_policy(
             )
 
     # Resolve settings under task-aware dispatcher
-    if requested_policy == PROMPT_POLICY_TASK_AWARE:
+    if requested_policy in (PROMPT_POLICY_TASK_AWARE, PROMPT_POLICY_TASK_AWARE_CANDIDATE):
+        is_candidate = (requested_policy == PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+        default_cls_budget = 128 if is_candidate else 64
+        default_sum_budget = 384 if is_candidate else 256
+        policy_label = "candidate" if is_candidate else "baseline"
+
         if evaluation_type == "multiple_choice":
             resolved_policy = PROMPT_POLICY_V4_STRUCTURED_OUTPUT
-            budget = user_output_budget or 64
+            budget = user_output_budget or (custom_budgets.get("multiple_choice") if custom_budgets else None) or 64
             thinking = user_think if user_think is not None else False
             schema = MULTIPLE_CHOICE_JSON_SCHEMA
-            description = "Task-aware structured JSON output policy (schema-constrained A/B/C/D)."
+            description = f"Task-aware structured JSON output policy ({policy_label}, schema-constrained A/B/C/D)."
 
         elif task_type == "classification":
             resolved_policy = PROMPT_POLICY_V2_ANSWER_ONLY
-            budget = user_output_budget or 64
+            budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or default_cls_budget
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware concise answer-only label policy for classification."
+            description = f"Task-aware concise answer-only label policy for classification ({policy_label}, budget {budget})."
 
         elif task_type == "math" and evaluation_type == "exact_match":
             resolved_policy = PROMPT_POLICY_V1_CONCISE
-            budget = user_output_budget or 512
+            budget = user_output_budget or (custom_budgets.get("math") if custom_budgets else None) or 512
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware concise derivation with Final Answer marker for math."
+            description = f"Task-aware concise derivation with Final Answer marker for math ({policy_label})."
 
         elif task_type == "reasoning" and evaluation_type == "exact_match":
             resolved_policy = PROMPT_POLICY_V1_CONCISE
-            budget = user_output_budget or 256
+            budget = user_output_budget or (custom_budgets.get("reasoning") if custom_budgets else None) or 256
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware concise derivation with Final Answer marker for boolean/reasoning."
+            description = f"Task-aware concise derivation with Final Answer marker for boolean/reasoning ({policy_label})."
 
         elif task_type == "instruction_following" and evaluation_type == "ifeval":
             resolved_policy = PROMPT_POLICY_V0
-            budget = user_output_budget or 1024
+            budget = user_output_budget or (custom_budgets.get("instruction_following") if custom_budgets else None) or 1024
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware verbatim prompt policy for instruction-following constraints."
+            description = f"Task-aware verbatim prompt policy for instruction-following constraints ({policy_label})."
 
         elif task_type == "summarization" and evaluation_type == "reference_based":
             resolved_policy = PROMPT_POLICY_V1_CONCISE
-            budget = user_output_budget or 256
+            budget = user_output_budget or (custom_budgets.get("summarization") if custom_budgets else None) or default_sum_budget
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware bounded 2-3 sentence summarization policy."
+            description = f"Task-aware bounded 2-3 sentence summarization policy ({policy_label}, budget {budget})."
 
         elif task_type == "coding" and evaluation_type == "code_execution":
             resolved_policy = PROMPT_POLICY_V1_CONCISE
-            budget = user_output_budget or 512
+            budget = user_output_budget or (custom_budgets.get("coding") if custom_budgets else None) or 512
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware code block implementation policy."
+            description = f"Task-aware code block implementation policy ({policy_label})."
 
         else:
             resolved_policy = PROMPT_POLICY_V1_CONCISE
-            budget = user_output_budget or resolve_output_budget(task_type, evaluation_type)
+            budget = user_output_budget or resolve_output_budget(task_type, evaluation_type, custom_budgets=custom_budgets)
             thinking = user_think if user_think is not None else False
             schema = None
-            description = "Task-aware default concise policy."
+            description = f"Task-aware default concise policy ({policy_label})."
 
     else:
         # User specified an explicit policy override (v0, v1_concise, v2_answer_only, v3_few_shot, v4_structured_output)
