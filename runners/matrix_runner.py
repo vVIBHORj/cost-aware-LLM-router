@@ -30,6 +30,7 @@ from runners.inference import InferenceProvider, load_pricing_config
 from runners.inference_policy import (
     DEFAULT_TASK_OUTPUT_BUDGETS,
     DEFAULT_THINKING_POLICY,
+    PROMPT_POLICY_PHASE4T,
     PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_TASK_AWARE_CANDIDATE,
     PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
@@ -604,6 +605,7 @@ def build_run_manifest(
         PROMPT_POLICY_TASK_AWARE,
         PROMPT_POLICY_TASK_AWARE_CANDIDATE,
         PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+        PROMPT_POLICY_PHASE4T,
     ):
         schema_dict = {"mode": f"{prompt_policy_version}_dispatch"}
     else:
@@ -805,6 +807,7 @@ def run_matrix(
         PROMPT_POLICY_TASK_AWARE,
         PROMPT_POLICY_TASK_AWARE_CANDIDATE,
         PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+        PROMPT_POLICY_PHASE4T,
     ):
         schema_dict = {"mode": f"{prompt_policy_version}_dispatch"}
     else:
@@ -919,6 +922,7 @@ def run_matrix(
             PROMPT_POLICY_TASK_AWARE: "Task-aware adaptive dispatch across all 8 benchmark categories",
             PROMPT_POLICY_TASK_AWARE_CANDIDATE: "Task-aware candidate tuned dispatch (classification 128 tok, summarization 384 tok)",
             PROMPT_POLICY_TASK_AWARE_CONSTRAINED: "Task-aware constrained diagnostic dispatch (grammar-constrained classification, output-only summarization)",
+            PROMPT_POLICY_PHASE4T: "Phase 4T frozen policy (schema-constrained MC & boolean classification, task-aware math/reasoning/IFEval/summarization/quarantined coding)",
         }
         policy_desc = policy_descriptions.get(prompt_policy_version, "Custom prompt policy")
         budget_desc = f"{max_output_tokens} tokens (explicit override)" if max_output_tokens else f"dynamic per task (multiple_choice: {DEFAULT_TASK_OUTPUT_BUDGETS['multiple_choice']}, exact_match: {DEFAULT_TASK_OUTPUT_BUDGETS['exact_match']}, classification: {DEFAULT_TASK_OUTPUT_BUDGETS['classification']})"

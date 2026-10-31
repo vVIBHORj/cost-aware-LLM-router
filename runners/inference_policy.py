@@ -82,6 +82,7 @@ PROMPT_POLICY_V4_STRUCTURED_OUTPUT = "v4_structured_output"
 PROMPT_POLICY_TASK_AWARE = "task_aware"
 PROMPT_POLICY_TASK_AWARE_CANDIDATE = "task_aware_candidate"
 PROMPT_POLICY_TASK_AWARE_CONSTRAINED = "task_aware_constrained"
+PROMPT_POLICY_PHASE4T = "phase4t_frozen"
 
 SUPPORTED_PROMPT_POLICIES = {
     PROMPT_POLICY_V0,
@@ -92,6 +93,7 @@ SUPPORTED_PROMPT_POLICIES = {
     PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_TASK_AWARE_CANDIDATE,
     PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    PROMPT_POLICY_PHASE4T,
 }
 
 COMPATIBLE_SCORERS: dict[str, tuple[str, str]] = {
@@ -143,6 +145,17 @@ BOOLEAN_CLASSIFICATION_JSON_SCHEMA: dict[str, Any] = {
         "label": {
             "type": "string",
             "enum": ["true", "false", "True", "False"],
+        }
+    },
+    "required": ["label"],
+    "additionalProperties": False,
+}
+
+GENERAL_CLASSIFICATION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "string",
         }
     },
     "required": ["label"],
@@ -344,6 +357,7 @@ def dispatch_task_policy(
     user_think: bool | None = None,
     response_format: dict[str, Any] | str | None = None,
     custom_budgets: dict[str, int] | None = None,
+    source_dataset: str | None = None,
 ) -> DispatchedTaskPolicy:
     """
     Select explicit inference settings based on task type and evaluation type.
@@ -395,14 +409,17 @@ def dispatch_task_policy(
         PROMPT_POLICY_TASK_AWARE,
         PROMPT_POLICY_TASK_AWARE_CANDIDATE,
         PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+        PROMPT_POLICY_PHASE4T,
     ):
         is_candidate = (requested_policy == PROMPT_POLICY_TASK_AWARE_CANDIDATE)
         is_constrained = (requested_policy == PROMPT_POLICY_TASK_AWARE_CONSTRAINED)
+        is_phase4t = (requested_policy == PROMPT_POLICY_PHASE4T)
         default_cls_budget = 128 if is_candidate else 64
         default_sum_budget = 384 if is_candidate else 256
         policy_label = (
-            "constrained" if is_constrained
-            else ("candidate" if is_candidate else "baseline")
+            "phase4t_frozen" if is_phase4t
+            else ("constrained" if is_constrained
+                  else ("candidate" if is_candidate else "baseline"))
         )
 
         if evaluation_type == "multiple_choice":
@@ -413,12 +430,19 @@ def dispatch_task_policy(
             description = f"Task-aware structured JSON output policy ({policy_label}, schema-constrained A/B/C/D)."
 
         elif task_type == "classification":
-            if is_constrained:
+            is_bool = (source_dataset in ("boolq", "wic", "wsc", "multirc") or source_dataset is None or is_constrained)
+            if is_constrained or (is_phase4t and is_bool):
                 resolved_policy = PROMPT_POLICY_TASK_AWARE_CONSTRAINED
                 budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or 64
                 thinking = user_think if user_think is not None else False
                 schema = BOOLEAN_CLASSIFICATION_JSON_SCHEMA
-                description = "Task-aware grammar-constrained JSON output policy for classification (Phase 4S)."
+                description = f"Task-aware grammar-constrained JSON output policy for classification ({policy_label})."
+            elif is_phase4t:
+                resolved_policy = PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+                budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or 64
+                thinking = user_think if user_think is not None else False
+                schema = GENERAL_CLASSIFICATION_JSON_SCHEMA
+                description = f"Task-aware general classification JSON schema policy ({policy_label})."
             else:
                 resolved_policy = PROMPT_POLICY_V2_ANSWER_ONLY
                 budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or default_cls_budget

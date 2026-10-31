@@ -81,6 +81,8 @@ This repository builds the evaluation infrastructure for a local-first, empirica
 | 4P | Controlled training pilot | 48 attempts across 16 pilot prompts; generic v0 baseline audit & SLA analysis | ✅ Completed |
 | 4Q | Task-aware inference policy | Dynamic task dispatch, schema exclusivity, safe scoring, coding sandbox quarantine | ✅ Completed |
 | 4R | Audit & targeted 4B validation | Comprehensive 4Q audit, 4B budget experiment, root-cause chatter analysis | ✅ Completed |
+| 4S | Constrained output diagnostic | Grammar-constrained BoolQ JSON schema (78% latency reduction, 0% truncation) and summarization prompt diagnostic | ✅ Completed |
+| 4T | Medium-scale training validation | Immutable versioned policy (`phase4t_frozen`), 120 stratified training prompts, 360-attempt paired matrix across 1.7B/4B/8B | 🔄 In Progress |
 | 5 | Candidate inference matrix | Systematic evaluation of candidates on benchmark splits | ⏳ Next |
 | 6 | Router training and serving | Train router, calibrate quality/cost trade-offs, expose a service | ⏳ Planned |
 | 7 | Held-out evaluation | Final test and stress-split evaluation | ⏳ Planned |
@@ -362,6 +364,13 @@ Qwen3 can generate extended reasoning tokens. On a resource-constrained machine,
 
 Example output budgets described in the project implementation include 768 tokens for multiple-choice tasks, 512 for exact-match tasks, and 128 for classification. These are policy examples and should be checked against the active configuration before changing them.
 
+### Constrained generation and structured schemas
+
+Following Phase 4Q–4S empirical evaluations:
+- **Multiple-choice:** constrained using Ollama's native JSON schema (`{"type": "object", "properties": {"answer": {"enum": ["A", "B", "C", "D"]}}}`) with a 64-token budget, ensuring deterministic parsing and eliminating option truncation.
+- **Classification:** constrained using Boolean JSON schema (`{"type": "object", "properties": {"label": {"enum": ["true", "false", "True", "False"]}}}`) for Boolean benchmarks (BoolQ, WiC, WSC, MultiRC), which eliminated Qwen3-4B truncation and cut median latency by 78%.
+- **Generative tasks:** summarization (256 tokens), math (512 tokens), reasoning (256 tokens), instruction-following (1024 tokens), and quarantined coding (512 tokens) retain unconstrained text generation with task-specific budgets under `phase4t_frozen` dispatch.
+
 ---
 
 ## ⚖️ Scoring and Baselines
@@ -484,12 +493,15 @@ cost-aware-llm-router/
 ├── runners/
 │   ├── backend_diagnostics.py  # Ollama/vLLM preflight and hardware checks
 │   ├── inference.py             # Provider interface, retry and cost accounting
-│   ├── inference_policy.py      # Token budgets and thinking-mode policy
+│   ├── inference_policy.py      # Token budgets, schema dispatch, and thinking-mode policy
+│   ├── matrix_runner.py         # Resumable evaluation matrix runner with fingerprinting
 │   ├── ollama_runner.py         # Native Ollama /api/chat provider
 │   ├── outcome_schema.py        # ModelOutcome and RunManifest schemas
 │   ├── smoke_runner.py          # Configurable smoke-matrix runner
 │   ├── storage.py               # Parquet outcome reader/writer
 │   └── vllm_runner.py           # vLLM and mock provider implementations
+├── scripts/
+│   └── select_phase4t_prompts.py # Stratified prompt selection for Phase 4T validation
 ├── tests/                       # Unit and integration tests
 ├── pyproject.toml               # Build metadata and dependencies
 └── README.md                    # Project documentation
@@ -677,7 +689,8 @@ flowchart LR
 - [x] **Phase 1:** Benchmark ingestion, dataset adaptation, stratified splitting, and cryptographic freezing.
 - [x] **Phase 2:** Inference provider contracts, telemetry, retry handling, and Parquet outcome storage.
 - [x] **Phase 3:** Task-aware scoring harness and baseline policy definitions.
-- [x] **Phase 4:** Local Ollama integration, model acquisition, hardware diagnostics, output-budget controls, controlled pilots (4P), task-aware inference policy validation (4Q), and targeted 4B audit and validation (4R).
+- [x] **Phase 4:** Local Ollama integration, model acquisition, hardware diagnostics, output-budget controls, controlled pilots (4P), task-aware inference policy validation (4Q), targeted 4B audit and validation (4R), and constrained output diagnostics (4S).
+- [ ] **Phase 4T:** Medium-scale training validation (120 prompts, 360 attempts) under immutable frozen policy dispatch.
 - [ ] **Phase 5:** Evaluate the full candidate matrix on the training split.
 - [ ] **Phase 6:** Train routing models and calibrate quality/cost thresholds using validation data.
 - [ ] **Phase 7:** Evaluate the frozen policy on test and stress splits.

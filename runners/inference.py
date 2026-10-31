@@ -131,6 +131,7 @@ class InferenceProvider(ABC):
             user_output_budget=max_output_tokens,
             user_think=think,
             response_format=response_format,
+            source_dataset=prompt.source_dataset,
         )
         effective_max_tokens = dispatched.output_budget
         effective_think = dispatched.thinking_mode

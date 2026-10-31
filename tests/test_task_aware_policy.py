@@ -8,12 +8,14 @@ from runners.inference_policy import (
     PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_TASK_AWARE_CANDIDATE,
     PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    PROMPT_POLICY_PHASE4T,
     PROMPT_POLICY_V0,
     PROMPT_POLICY_V1_CONCISE,
     PROMPT_POLICY_V2_ANSWER_ONLY,
     PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
     MULTIPLE_CHOICE_JSON_SCHEMA,
     BOOLEAN_CLASSIFICATION_JSON_SCHEMA,
+    GENERAL_CLASSIFICATION_JSON_SCHEMA,
     UnsupportedTaskPolicyError,
     dispatch_task_policy,
     validate_structured_output_json,
@@ -386,5 +388,122 @@ def test_score_exact_match_with_malformed_json_fails():
 
     res_wrong_key = score_exact_match('{"other": "true"}', "True")
     assert res_wrong_key["quality_score"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 4T Frozen Policy Tests
+# ---------------------------------------------------------------------------
+
+def test_phase4t_dispatch_multiple_choice():
+    p = dispatch_task_policy(
+        "What is the capital of France?\nA. London\nB. Paris\nC. Berlin\nD. Rome",
+        task_type="qa",
+        evaluation_type="multiple_choice",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+    )
+    assert p.policy_version == PROMPT_POLICY_V4_STRUCTURED_OUTPUT
+    assert p.output_budget == 64
+    assert p.thinking_mode is False
+    assert p.response_schema == MULTIPLE_CHOICE_JSON_SCHEMA
+    assert p.compatible_scorer == "multiple_choice_scorer"
+
+
+def test_phase4t_dispatch_classification_boolq():
+    p = dispatch_task_policy(
+        "Passage: ... Question: Is water wet?",
+        task_type="classification",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+        source_dataset="boolq",
+    )
+    assert p.policy_version == PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+    assert p.output_budget == 64
+    assert p.thinking_mode is False
+    assert p.response_schema == BOOLEAN_CLASSIFICATION_JSON_SCHEMA
+    assert p.compatible_scorer == "exact_match_scorer"
+
+
+def test_phase4t_dispatch_classification_general():
+    p = dispatch_task_policy(
+        "Premise: ... Hypothesis: ...",
+        task_type="classification",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+        source_dataset="super_glue_rte",
+    )
+    assert p.policy_version == PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+    assert p.output_budget == 64
+    assert p.thinking_mode is False
+    assert p.response_schema == GENERAL_CLASSIFICATION_JSON_SCHEMA
+
+
+def test_phase4t_dispatch_summarization():
+    p = dispatch_task_policy(
+        "News article...",
+        task_type="summarization",
+        evaluation_type="reference_based",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+        source_dataset="cnn_dailymail",
+    )
+    assert p.policy_version == PROMPT_POLICY_V1_CONCISE
+    assert p.output_budget == 256
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+    assert p.compatible_scorer == "reference_based_scorer"
+
+
+def test_phase4t_dispatch_math():
+    p = dispatch_task_policy(
+        "Solve 2+2",
+        task_type="math",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+    )
+    assert p.policy_version == PROMPT_POLICY_V1_CONCISE
+    assert p.output_budget == 512
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+
+
+def test_phase4t_dispatch_reasoning():
+    p = dispatch_task_policy(
+        "Evaluate True and False",
+        task_type="reasoning",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+    )
+    assert p.policy_version == PROMPT_POLICY_V1_CONCISE
+    assert p.output_budget == 256
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+
+
+def test_phase4t_dispatch_coding():
+    p = dispatch_task_policy(
+        "def foo(): pass",
+        task_type="coding",
+        evaluation_type="code_execution",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+    )
+    assert p.policy_version == PROMPT_POLICY_V1_CONCISE
+    assert p.output_budget == 512
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+
+
+def test_phase4t_dispatch_ifeval():
+    raw_prompt = "Write a haiku about clouds."
+    p = dispatch_task_policy(
+        raw_prompt,
+        task_type="instruction_following",
+        evaluation_type="ifeval",
+        requested_policy=PROMPT_POLICY_PHASE4T,
+    )
+    assert p.policy_version == PROMPT_POLICY_V0
+    assert p.output_budget == 1024
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+    assert p.effective_prompt == raw_prompt
+
 
 
