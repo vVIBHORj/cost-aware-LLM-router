@@ -34,6 +34,33 @@ def extract_final_answer(text: str) -> str | None:
     return None
 
 
+def extract_json_label(text: str) -> str | None:
+    """Extract label or answer value from structured JSON if present."""
+    if not text or not text.strip():
+        return None
+    cleaned = text.strip()
+    json_candidate = cleaned
+    if "```json" in json_candidate:
+        m_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", json_candidate, re.DOTALL)
+        if m_block:
+            json_candidate = m_block.group(1).strip()
+    if json_candidate.startswith("{") and json_candidate.endswith("}"):
+        try:
+            import json as _json
+            data = _json.loads(json_candidate)
+            if isinstance(data, dict):
+                for key in ("label", "answer", "prediction"):
+                    if key in data:
+                        val = data[key]
+                        if isinstance(val, bool):
+                            return "true" if val else "false"
+                        if isinstance(val, (str, int, float)):
+                            return str(val).strip()
+        except Exception:
+            pass
+    return None
+
+
 def score_exact_match(
     prediction: str,
     reference: str,
@@ -51,9 +78,14 @@ def score_exact_match(
 
     is_strict = (pred_clean == ref_clean)
 
-    # Check boxed match if reference or prediction has LaTeX boxed, or Final Answer: prefix
+    # Check JSON structured label, boxed match if reference or prediction has LaTeX boxed, or Final Answer: prefix
     ref_boxed = extract_boxed_math(ref_clean) or ref_clean
-    pred_boxed = extract_boxed_math(pred_clean) or extract_final_answer(pred_clean) or pred_clean
+    pred_boxed = (
+        extract_json_label(pred_clean)
+        or extract_boxed_math(pred_clean)
+        or extract_final_answer(pred_clean)
+        or pred_clean
+    )
 
     norm_pred = normalize_exact_text(pred_boxed)
     norm_ref = normalize_exact_text(ref_boxed)

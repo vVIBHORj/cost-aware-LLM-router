@@ -7,11 +7,13 @@ from eval.scorers.exact_match import extract_final_answer, score_exact_match
 from runners.inference_policy import (
     PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+    PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
     PROMPT_POLICY_V0,
     PROMPT_POLICY_V1_CONCISE,
     PROMPT_POLICY_V2_ANSWER_ONLY,
     PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
     MULTIPLE_CHOICE_JSON_SCHEMA,
+    BOOLEAN_CLASSIFICATION_JSON_SCHEMA,
     UnsupportedTaskPolicyError,
     dispatch_task_policy,
     validate_structured_output_json,
@@ -322,4 +324,67 @@ def test_task_aware_custom_budgets_override():
         custom_budgets={"classification": 200},
     )
     assert p.output_budget == 200
+
+
+# ---------------------------------------------------------------------------
+# 6. Constrained output diagnostic tests (Phase 4S)
+# ---------------------------------------------------------------------------
+
+def test_task_aware_constrained_dispatch_classification():
+    p = dispatch_task_policy(
+        "Passage: ... Question: Is this true?",
+        task_type="classification",
+        evaluation_type="exact_match",
+        requested_policy=PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    )
+    assert p.policy_version == PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+    assert p.output_budget == 64
+    assert p.thinking_mode is False
+    assert p.response_schema == BOOLEAN_CLASSIFICATION_JSON_SCHEMA
+    assert p.compatible_scorer == "exact_match_scorer"
+    assert 'JSON object with key \'label\' whose value is \'true\' or \'false\'' in p.effective_prompt
+
+
+def test_task_aware_constrained_dispatch_summarization():
+    p = dispatch_task_policy(
+        "Long news article text...",
+        task_type="summarization",
+        evaluation_type="reference_based",
+        requested_policy=PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    )
+    assert p.policy_version == PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+    assert p.output_budget == 256
+    assert p.thinking_mode is False
+    assert p.response_schema is None
+    assert p.compatible_scorer == "reference_based_scorer"
+    assert "Provide only the final 2-3 sentence summary" in p.effective_prompt
+    assert "no reasoning, no planning" in p.effective_prompt
+
+
+def test_score_exact_match_with_json_label():
+    res_true = score_exact_match('{"label": "true"}', "True")
+    assert res_true["quality_score"] == 1.0
+    assert res_true["normalized_exact_match"] is True
+
+    res_false = score_exact_match('{"label": "false"}', "False")
+    assert res_false["quality_score"] == 1.0
+    assert res_false["normalized_exact_match"] is True
+
+    res_mismatch = score_exact_match('{"label": "false"}', "True")
+    assert res_mismatch["quality_score"] == 0.0
+    assert res_mismatch["normalized_exact_match"] is False
+
+    # Boolean literal in JSON
+    res_bool = score_exact_match('{"label": true}', "True")
+    assert res_bool["quality_score"] == 1.0
+    assert res_bool["normalized_exact_match"] is True
+
+
+def test_score_exact_match_with_malformed_json_fails():
+    res_malformed = score_exact_match('{"label":', "True")
+    assert res_malformed["quality_score"] == 0.0
+
+    res_wrong_key = score_exact_match('{"other": "true"}', "True")
+    assert res_wrong_key["quality_score"] == 0.0
+
 

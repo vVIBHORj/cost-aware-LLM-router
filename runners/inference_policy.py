@@ -81,6 +81,7 @@ PROMPT_POLICY_V3_FEW_SHOT = "v3_few_shot"
 PROMPT_POLICY_V4_STRUCTURED_OUTPUT = "v4_structured_output"
 PROMPT_POLICY_TASK_AWARE = "task_aware"
 PROMPT_POLICY_TASK_AWARE_CANDIDATE = "task_aware_candidate"
+PROMPT_POLICY_TASK_AWARE_CONSTRAINED = "task_aware_constrained"
 
 SUPPORTED_PROMPT_POLICIES = {
     PROMPT_POLICY_V0,
@@ -90,6 +91,7 @@ SUPPORTED_PROMPT_POLICIES = {
     PROMPT_POLICY_V4_STRUCTURED_OUTPUT,
     PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+    PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
 }
 
 COMPATIBLE_SCORERS: dict[str, tuple[str, str]] = {
@@ -135,6 +137,18 @@ MULTIPLE_CHOICE_JSON_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+BOOLEAN_CLASSIFICATION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "string",
+            "enum": ["true", "false", "True", "False"],
+        }
+    },
+    "required": ["label"],
+    "additionalProperties": False,
+}
+
 STRUCTURED_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "multiple_choice": MULTIPLE_CHOICE_JSON_SCHEMA,
     "exact_match": {
@@ -145,14 +159,7 @@ STRUCTURED_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["answer"],
         "additionalProperties": False,
     },
-    "classification": {
-        "type": "object",
-        "properties": {
-            "label": {"type": "string"}
-        },
-        "required": ["label"],
-        "additionalProperties": False,
-    },
+    "classification": BOOLEAN_CLASSIFICATION_JSON_SCHEMA,
 }
 
 DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
@@ -206,7 +213,15 @@ DEFAULT_PROMPT_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
             "Solve the question. Return a JSON object with key 'answer' containing the final answer."
         ),
         "classification": (
-            "Classify the text. Return a JSON object with key 'label' containing the classification label."
+            "Answer the question based on the text. Return a JSON object with key 'label' whose value is 'true' or 'false'."
+        ),
+    },
+    PROMPT_POLICY_TASK_AWARE_CONSTRAINED: {
+        "classification": (
+            "Answer the question based on the text. Return a JSON object with key 'label' whose value is 'true' or 'false'."
+        ),
+        "summarization": (
+            "Provide only the final 2-3 sentence summary of the article. Output strictly the summary text alone with no introductory preamble, no reasoning, no planning, and no conversational commentary."
         ),
     },
 }
@@ -376,11 +391,19 @@ def dispatch_task_policy(
             )
 
     # Resolve settings under task-aware dispatcher
-    if requested_policy in (PROMPT_POLICY_TASK_AWARE, PROMPT_POLICY_TASK_AWARE_CANDIDATE):
+    if requested_policy in (
+        PROMPT_POLICY_TASK_AWARE,
+        PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+        PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    ):
         is_candidate = (requested_policy == PROMPT_POLICY_TASK_AWARE_CANDIDATE)
+        is_constrained = (requested_policy == PROMPT_POLICY_TASK_AWARE_CONSTRAINED)
         default_cls_budget = 128 if is_candidate else 64
         default_sum_budget = 384 if is_candidate else 256
-        policy_label = "candidate" if is_candidate else "baseline"
+        policy_label = (
+            "constrained" if is_constrained
+            else ("candidate" if is_candidate else "baseline")
+        )
 
         if evaluation_type == "multiple_choice":
             resolved_policy = PROMPT_POLICY_V4_STRUCTURED_OUTPUT
@@ -390,11 +413,18 @@ def dispatch_task_policy(
             description = f"Task-aware structured JSON output policy ({policy_label}, schema-constrained A/B/C/D)."
 
         elif task_type == "classification":
-            resolved_policy = PROMPT_POLICY_V2_ANSWER_ONLY
-            budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or default_cls_budget
-            thinking = user_think if user_think is not None else False
-            schema = None
-            description = f"Task-aware concise answer-only label policy for classification ({policy_label}, budget {budget})."
+            if is_constrained:
+                resolved_policy = PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+                budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or 64
+                thinking = user_think if user_think is not None else False
+                schema = BOOLEAN_CLASSIFICATION_JSON_SCHEMA
+                description = "Task-aware grammar-constrained JSON output policy for classification (Phase 4S)."
+            else:
+                resolved_policy = PROMPT_POLICY_V2_ANSWER_ONLY
+                budget = user_output_budget or (custom_budgets.get("classification") if custom_budgets else None) or default_cls_budget
+                thinking = user_think if user_think is not None else False
+                schema = None
+                description = f"Task-aware concise answer-only label policy for classification ({policy_label}, budget {budget})."
 
         elif task_type == "math" and evaluation_type == "exact_match":
             resolved_policy = PROMPT_POLICY_V1_CONCISE
@@ -418,11 +448,18 @@ def dispatch_task_policy(
             description = f"Task-aware verbatim prompt policy for instruction-following constraints ({policy_label})."
 
         elif task_type == "summarization" and evaluation_type == "reference_based":
-            resolved_policy = PROMPT_POLICY_V1_CONCISE
-            budget = user_output_budget or (custom_budgets.get("summarization") if custom_budgets else None) or default_sum_budget
-            thinking = user_think if user_think is not None else False
-            schema = None
-            description = f"Task-aware bounded 2-3 sentence summarization policy ({policy_label}, budget {budget})."
+            if is_constrained:
+                resolved_policy = PROMPT_POLICY_TASK_AWARE_CONSTRAINED
+                budget = user_output_budget or (custom_budgets.get("summarization") if custom_budgets else None) or 256
+                thinking = user_think if user_think is not None else False
+                schema = None
+                description = "Task-aware output-only constrained summarization policy (Phase 4S, budget 256)."
+            else:
+                resolved_policy = PROMPT_POLICY_V1_CONCISE
+                budget = user_output_budget or (custom_budgets.get("summarization") if custom_budgets else None) or default_sum_budget
+                thinking = user_think if user_think is not None else False
+                schema = None
+                description = f"Task-aware bounded 2-3 sentence summarization policy ({policy_label}, budget {budget})."
 
         elif task_type == "coding" and evaluation_type == "code_execution":
             resolved_policy = PROMPT_POLICY_V1_CONCISE

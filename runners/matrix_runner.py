@@ -32,6 +32,7 @@ from runners.inference_policy import (
     DEFAULT_THINKING_POLICY,
     PROMPT_POLICY_TASK_AWARE,
     PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+    PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
     PROMPT_POLICY_V0,
     PROMPT_POLICY_V1_CONCISE,
     PROMPT_POLICY_V2_ANSWER_ONLY,
@@ -599,7 +600,11 @@ def build_run_manifest(
     token_accounting_avail = any(o.prompt_tokens is not None for o in outcomes)
     latency_avail = any(o.latency_ms > 0.0 for o in outcomes)
 
-    if prompt_policy_version in (PROMPT_POLICY_TASK_AWARE, PROMPT_POLICY_TASK_AWARE_CANDIDATE):
+    if prompt_policy_version in (
+        PROMPT_POLICY_TASK_AWARE,
+        PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+        PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    ):
         schema_dict = {"mode": f"{prompt_policy_version}_dispatch"}
     else:
         schema_used = resolve_response_format(policy_version=prompt_policy_version)
@@ -796,7 +801,11 @@ def run_matrix(
     models_checksum = compute_file_sha256(models_config_path)
 
     effective_backend = "mock" if use_mock else (backend or "ollama")
-    if prompt_policy_version in (PROMPT_POLICY_TASK_AWARE, PROMPT_POLICY_TASK_AWARE_CANDIDATE):
+    if prompt_policy_version in (
+        PROMPT_POLICY_TASK_AWARE,
+        PROMPT_POLICY_TASK_AWARE_CANDIDATE,
+        PROMPT_POLICY_TASK_AWARE_CONSTRAINED,
+    ):
         schema_dict = {"mode": f"{prompt_policy_version}_dispatch"}
     else:
         schema_used = resolve_response_format(policy_version=prompt_policy_version)
@@ -909,6 +918,7 @@ def run_matrix(
             PROMPT_POLICY_V4_STRUCTURED_OUTPUT: "Native Ollama structured JSON schema enum constraint",
             PROMPT_POLICY_TASK_AWARE: "Task-aware adaptive dispatch across all 8 benchmark categories",
             PROMPT_POLICY_TASK_AWARE_CANDIDATE: "Task-aware candidate tuned dispatch (classification 128 tok, summarization 384 tok)",
+            PROMPT_POLICY_TASK_AWARE_CONSTRAINED: "Task-aware constrained diagnostic dispatch (grammar-constrained classification, output-only summarization)",
         }
         policy_desc = policy_descriptions.get(prompt_policy_version, "Custom prompt policy")
         budget_desc = f"{max_output_tokens} tokens (explicit override)" if max_output_tokens else f"dynamic per task (multiple_choice: {DEFAULT_TASK_OUTPUT_BUDGETS['multiple_choice']}, exact_match: {DEFAULT_TASK_OUTPUT_BUDGETS['exact_match']}, classification: {DEFAULT_TASK_OUTPUT_BUDGETS['classification']})"
